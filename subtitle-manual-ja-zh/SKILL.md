@@ -40,7 +40,25 @@ Read the file first and confirm:
 - whether there are obvious repeated lines, merged lines, or broken timestamps
 - whether the content is short enough to complete in one pass or should be processed in batches
 
-Prefer fast local inspection tools such as `python3`, `sed`, and `rg`.
+Prefer the bundled parser first:
+
+```bash
+node subtitle-manual-ja-zh/scripts/srt-tool.mjs inspect /path/to/file.srt
+```
+
+Use `--json` when you want structured output for follow-up processing:
+
+```bash
+node subtitle-manual-ja-zh/scripts/srt-tool.mjs inspect /path/to/file.srt --json
+```
+
+Use `dump-json` when you want the full parsed block list:
+
+```bash
+node subtitle-manual-ja-zh/scripts/srt-tool.mjs dump-json /path/to/file.srt
+```
+
+Fallback to fast local inspection tools such as `sed` and `rg` only when you need extra spot checks.
 
 ### 2. Correct the Japanese line first
 
@@ -103,6 +121,13 @@ Confirm:
 - no blocks were dropped
 - the last block is intact
 - timing still parses as valid `SRT`
+
+Before starting manual translation work, use the script output to identify:
+- malformed numbering
+- invalid timestamps
+- overlaps and negative durations
+- suspiciously dense short subtitles
+- fragmented or empty blocks
 
 ## Naming Convention
 
