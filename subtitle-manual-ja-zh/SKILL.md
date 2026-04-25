@@ -1,6 +1,6 @@
 ---
 name: subtitle-manual-ja-zh
-description: Use when the user wants a Japanese subtitle file corrected and manually translated into a Japanese-Chinese bilingual SRT. Best for Whisper or ASR-generated `.srt` files where the job is to fix likely recognition errors from context, preserve or lightly repair timing, and write natural Chinese subtitles without using external translation APIs.
+description: Use when the user wants a Japanese subtitle file corrected and manually translated into a Japanese-Chinese bilingual SRT. Best for Whisper or ASR-generated `.srt` files where the job is to fix likely recognition errors from context, preserve or lightly repair timing, and write natural Chinese subtitles by the current Codex session directly, without external translation APIs, other LLMs, or delegated translation services.
 ---
 
 # Subtitle Manual Ja Zh
@@ -15,6 +15,25 @@ Use it when we need to:
 - keep the subtitle timing unless it is clearly broken
 - produce a Japanese-Chinese bilingual `.srt`
 - avoid external translation APIs and translate by direct understanding
+- keep all translation work inside the current Codex session
+
+## Hard Constraints
+
+When this skill is active, translation must be performed by the current Codex session directly.
+
+Do not:
+- call any external translation API or SaaS
+- invoke any extra LLM, model endpoint, MCP translation tool, browser translation feature, or plugin whose purpose is translation
+- delegate the translation task to another agent, worker, or background process
+- send subtitle text to online services for translation, paraphrasing, or post-editing
+
+Allowed helpers:
+- local file inspection
+- local scripts in this skill directory
+- local shell utilities for parsing, counting, validating, or writing files
+- optional official source lookups only for factual name verification when the user explicitly wants stronger validation
+
+If a line is uncertain, resolve it from context and your own understanding first. Prefer a best-effort local human-style translation over any external dependency.
 
 ## When To Use
 
@@ -29,6 +48,7 @@ Do not use this skill when:
 - the user wants OCR from video rather than subtitle editing
 - the user explicitly wants external translation APIs or a fully automated pipeline
 - the user only wants a short excerpt translated in chat instead of file output
+- the user specifically asks to route the translation through another model or service
 
 ## Workflow
 
@@ -82,6 +102,11 @@ If the user asked for stronger name validation, check official Japanese sources 
 
 Translate from understanding, not by literal substitution.
 
+Operational rule:
+- write the Chinese lines yourself in this Codex session
+- do not ask another model or tool to draft, improve, or verify the translation
+- do not use online lookup except for factual proper-name validation when needed
+
 Target style:
 - natural subtitle Chinese
 - concise and readable
@@ -131,19 +156,25 @@ Before starting manual translation work, use the script output to identify:
 
 ## Naming Convention
 
-Follow the existing transcript naming pattern when possible.
+Preserve the original base filename and append a suffix before the extension.
+
+Default rule:
+- bilingual output: append `-bilingual`
+- Japanese-only corrected output: append `-corrected-ja`
 
 Examples:
 - source: `transcript-raw.srt`
-- bilingual output: `transcript-bilingual.srt`
+- bilingual output: `transcript-raw-bilingual.srt`
 - source: `transcript-raw (2).srt`
-- bilingual output: `transcript-bilingual (2).srt`
+- bilingual output: `transcript-raw (2)-bilingual.srt`
 
-If the user also wants a Japanese-only corrected file, use a parallel corrected name such as:
-- `transcript-raw-corrected (2).srt`
-- or `transcript-corrected-ja (2).srt`
+If the user also wants a Japanese-only corrected file, use:
+- `transcript-raw-corrected-ja.srt`
+- `transcript-raw (2)-corrected-ja.srt`
 
-Preserve the user's established naming style if earlier files in the same batch already imply one.
+Keep the original directory and original extension unchanged.
+
+If the user explicitly requests a different suffix, follow the user's suffix while still preserving the original base filename.
 
 ## Quality Bar
 
@@ -163,7 +194,7 @@ If some lines remain uncertain because the source itself is garbled, make the mo
 When using this skill, tell the user briefly:
 - that you are first inspecting the subtitle structure
 - then correcting likely Japanese recognition mistakes
-- then writing a fully manual Chinese translation
+- then writing a fully manual Chinese translation in the current Codex session without external translation services or extra LLM calls
 
 In the final response, keep it short and include:
 - the output file path

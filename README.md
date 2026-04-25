@@ -8,11 +8,14 @@ Custom Codex skills maintained in this repository.
 
 Manually correct Japanese `.srt` subtitles and translate them into Japanese-Chinese bilingual subtitles.
 
+The translation is intended to be written directly by the current Codex session, without external translation APIs, extra LLM calls, or delegated translation services.
+
 Use it for:
 - fixing likely ASR or Whisper subtitle errors
 - producing `日中双语字幕`
 - keeping timing unless there is an obvious timestamp problem
 - keeping names and terminology consistent across the file
+- writing output filenames by appending a suffix to the original filename
 
 ## Install
 
