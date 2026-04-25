@@ -1,0 +1,4 @@
+interface:
+  display_name: "Japanese Subtitle Manual Translator"
+  short_description: "Manually fix Japanese SRT and produce JP-ZH bilingual subtitles."
+  default_prompt: "Use $subtitle-manual-ja-zh to correct Japanese ASR subtitle errors and manually translate them into a Japanese-Chinese bilingual SRT."
