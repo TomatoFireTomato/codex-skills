@@ -1,4 +1,4 @@
 interface:
-  display_name: "Japanese Subtitle Manual Translator"
-  short_description: "Manually fix Japanese SRT and produce JP-ZH bilingual subtitles in the current Codex session without external translation services or extra LLM calls."
-  default_prompt: "Use $subtitle-manual-ja-zh to correct Japanese ASR subtitle errors and manually translate them into a Japanese-Chinese bilingual SRT inside the current Codex session. Do not call external translation services, other LLMs, delegated agents, or translation plugins."
+  display_name: "Japanese Whisper Subtitle Repair"
+  short_description: "Repair Japanese Whisper SRT with evidence-based review"
+  default_prompt: "Use $subtitle-manual-ja-zh to inspect and repair this Japanese Whisper/ASR SRT, verify proper names and high-risk blocks, and produce a validated Japanese-only corrected subtitle file."
