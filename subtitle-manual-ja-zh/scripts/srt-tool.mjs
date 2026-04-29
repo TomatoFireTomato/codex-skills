@@ -7,15 +7,37 @@ function printUsage() {
   console.log(`Usage:
   node subtitle-manual-ja-zh/scripts/srt-tool.mjs inspect <file.srt> [--json]
   node subtitle-manual-ja-zh/scripts/srt-tool.mjs dump-json <file.srt>
+  node subtitle-manual-ja-zh/scripts/srt-tool.mjs export-template <file.srt> <output.json>
+  node subtitle-manual-ja-zh/scripts/srt-tool.mjs write-corrected <template.json> <output.srt>
+  node subtitle-manual-ja-zh/scripts/srt-tool.mjs write-bilingual <template.json> <output.srt>
+  node subtitle-manual-ja-zh/scripts/srt-tool.mjs validate <file.srt> [--json]
 
 Commands:
-  inspect    Print a quick structural summary and flag suspicious subtitle blocks.
-  dump-json  Output parsed subtitle blocks as JSON for follow-up processing.
+  inspect          Print a quick structural summary and flag suspicious subtitle blocks.
+  dump-json        Output parsed subtitle blocks as JSON for follow-up processing.
+  export-template  Export a JSON work template for manual correction and translation.
+  write-corrected  Write a Japanese-only corrected SRT from a template JSON file.
+  write-bilingual  Write a Japanese-Chinese bilingual SRT from a template JSON file.
+  validate         Validate an output SRT and print summary plus structural issues.
 `);
+}
+
+function fail(message) {
+  console.error(`Error: ${message}`);
+  process.exitCode = 1;
 }
 
 function readText(filePath) {
   return fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
+}
+
+function writeText(filePath, text) {
+  fs.mkdirSync(path.dirname(path.resolve(filePath)), { recursive: true });
+  fs.writeFileSync(filePath, text, "utf8");
+}
+
+function readJson(filePath) {
+  return JSON.parse(readText(filePath));
 }
 
 function parseTimestamp(value) {
@@ -81,12 +103,14 @@ function parseSrt(text) {
   });
 }
 
-function collectIssues(blocks) {
+function collectIssues(blocks, options = {}) {
+  const expectBilingual = options.expectBilingual === true;
+  const expectCorrected = options.expectCorrected === true;
   const issues = [];
   let previousBlock = null;
 
   for (const block of blocks) {
-    const textLineCount = block.textLines.filter(Boolean).length;
+    const textLineCount = block.textLines.filter((line) => line.trim()).length;
 
     if (block.sequenceNumber === null) {
       issues.push({
@@ -136,11 +160,27 @@ function collectIssues(blocks) {
       });
     }
 
-    if (textLineCount >= 3) {
+    if (textLineCount >= 3 && !expectBilingual) {
       issues.push({
         type: "fragmented-lines",
         blockIndex: block.blockIndex,
         detail: `Block has ${textLineCount} text lines`,
+      });
+    }
+
+    if (expectCorrected && textLineCount !== 1) {
+      issues.push({
+        type: "unexpected-text-line-count",
+        blockIndex: block.blockIndex,
+        detail: `Expected 1 text line, got ${textLineCount}`,
+      });
+    }
+
+    if (expectBilingual && textLineCount !== 2) {
+      issues.push({
+        type: "unexpected-text-line-count",
+        blockIndex: block.blockIndex,
+        detail: `Expected 2 text lines, got ${textLineCount}`,
       });
     }
 
@@ -152,12 +192,7 @@ function collectIssues(blocks) {
       });
     }
 
-    if (
-      previousBlock &&
-      previousBlock.text &&
-      block.text &&
-      previousBlock.text === block.text
-    ) {
+    if (previousBlock && previousBlock.text && block.text && previousBlock.text === block.text) {
       issues.push({
         type: "duplicate-consecutive-text",
         blockIndex: block.blockIndex,
@@ -172,7 +207,9 @@ function collectIssues(blocks) {
 }
 
 function buildSummary(filePath, blocks, issues) {
-  const durations = blocks.map((block) => block.durationMs).filter((value) => typeof value === "number");
+  const durations = blocks
+    .map((block) => block.durationMs)
+    .filter((value) => typeof value === "number");
   const textLengths = blocks.map((block) => block.text.length);
   const totalDurationMs = durations.reduce((sum, value) => sum + value, 0);
   const issueCounts = issues.reduce((map, issue) => {
@@ -217,37 +254,209 @@ function printInspect(summary, issues) {
   }
 }
 
-function main(argv) {
-  const [, , command, filePath, ...rest] = argv;
-  const jsonMode = rest.includes("--json");
+function exportTemplate(blocks, sourcePath) {
+  return {
+    sourceFile: path.resolve(sourcePath),
+    generatedAt: new Date().toISOString(),
+    blockCount: blocks.length,
+    blocks: blocks.map((block) => ({
+      blockIndex: block.blockIndex,
+      sequenceNumber: block.sequenceNumber ?? block.blockIndex,
+      timecode: block.timecode,
+      sourceTextLines: block.textLines,
+      sourceText: block.text,
+      correctedJapanese: block.textLines.join(" ").trim(),
+      chinese: "",
+      notes: "",
+    })),
+  };
+}
 
-  if (!command || !filePath || !["inspect", "dump-json"].includes(command)) {
-    printUsage();
-    process.exitCode = 1;
-    return;
+function assertTemplateShape(template) {
+  if (!template || typeof template !== "object") {
+    throw new Error("Template JSON must be an object.");
   }
 
+  if (!Array.isArray(template.blocks)) {
+    throw new Error("Template JSON must include a blocks array.");
+  }
+}
+
+function validateTemplateBlocks(template, mode) {
+  assertTemplateShape(template);
+
+  template.blocks.forEach((block, index) => {
+    const label = `blocks[${index}]`;
+
+    if (!Number.isInteger(block.sequenceNumber) || block.sequenceNumber <= 0) {
+      throw new Error(`${label}.sequenceNumber must be a positive integer.`);
+    }
+
+    if (typeof block.timecode !== "string") {
+      throw new Error(`${label}.timecode must be a string.`);
+    }
+
+    const match = block.timecode.match(
+      /^(\d{2}:\d{2}:\d{2},\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2},\d{3})$/
+    );
+    if (!match) {
+      throw new Error(`${label}.timecode is not a valid SRT timecode.`);
+    }
+
+    if (typeof block.correctedJapanese !== "string" || block.correctedJapanese.trim() === "") {
+      throw new Error(`${label}.correctedJapanese must be a non-empty string.`);
+    }
+
+    if (mode === "bilingual" && (typeof block.chinese !== "string" || block.chinese.trim() === "")) {
+      throw new Error(`${label}.chinese must be a non-empty string for bilingual output.`);
+    }
+  });
+}
+
+function renderSrtFromTemplate(template, mode) {
+  validateTemplateBlocks(template, mode);
+
+  return `${template.blocks
+    .map((block, index) => {
+      const lines = [
+        String(index + 1),
+        block.timecode,
+        block.correctedJapanese.trim(),
+      ];
+
+      if (mode === "bilingual") {
+        lines.push(block.chinese.trim());
+      }
+
+      return lines.join("\n");
+    })
+    .join("\n\n")}\n`;
+}
+
+function detectOutputMode(blocks) {
+  const nonEmptyCounts = blocks.map((block) =>
+    block.textLines.filter((line) => line.trim()).length
+  );
+
+  if (nonEmptyCounts.every((count) => count === 2)) {
+    return "bilingual";
+  }
+
+  if (nonEmptyCounts.every((count) => count === 1)) {
+    return "corrected";
+  }
+
+  return "mixed";
+}
+
+function runInspect(filePath, jsonMode) {
   const text = readText(filePath);
   const blocks = parseSrt(text);
   const issues = collectIssues(blocks);
   const summary = buildSummary(filePath, blocks, issues);
 
-  if (command === "dump-json" || jsonMode) {
-    console.log(
-      JSON.stringify(
-        {
-          summary,
-          issues,
-          blocks,
-        },
-        null,
-        2
-      )
-    );
+  if (jsonMode) {
+    console.log(JSON.stringify({ summary, issues, blocks }, null, 2));
     return;
   }
 
   printInspect(summary, issues);
+}
+
+function runExportTemplate(inputPath, outputPath) {
+  const text = readText(inputPath);
+  const blocks = parseSrt(text);
+  const template = exportTemplate(blocks, inputPath);
+  writeText(outputPath, `${JSON.stringify(template, null, 2)}\n`);
+  console.log(`Template written: ${path.resolve(outputPath)}`);
+}
+
+function runWrite(templatePath, outputPath, mode) {
+  const template = readJson(templatePath);
+  const rendered = renderSrtFromTemplate(template, mode);
+  writeText(outputPath, rendered);
+  console.log(`Wrote ${mode} SRT: ${path.resolve(outputPath)}`);
+}
+
+function runValidate(filePath, jsonMode) {
+  const text = readText(filePath);
+  const blocks = parseSrt(text);
+  const mode = detectOutputMode(blocks);
+  const issues = collectIssues(blocks, {
+    expectBilingual: mode === "bilingual",
+    expectCorrected: mode === "corrected",
+  });
+  const summary = {
+    ...buildSummary(filePath, blocks, issues),
+    detectedMode: mode,
+  };
+
+  if (jsonMode) {
+    console.log(JSON.stringify({ summary, issues, blocks }, null, 2));
+    return;
+  }
+
+  printInspect(summary, issues);
+  console.log("");
+  console.log(`Detected mode: ${mode}`);
+}
+
+function main(argv) {
+  const [, , command, filePath, maybeOutputPath, ...rest] = argv;
+  const jsonMode = rest.includes("--json") || maybeOutputPath === "--json";
+
+  if (!command) {
+    printUsage();
+    process.exitCode = 1;
+    return;
+  }
+
+  try {
+    if (command === "inspect" || command === "dump-json") {
+      if (!filePath) {
+        throw new Error("A source SRT file path is required.");
+      }
+      runInspect(filePath, command === "dump-json" || jsonMode);
+      return;
+    }
+
+    if (command === "export-template") {
+      if (!filePath || !maybeOutputPath) {
+        throw new Error("Source SRT path and output JSON path are required.");
+      }
+      runExportTemplate(filePath, maybeOutputPath);
+      return;
+    }
+
+    if (command === "write-corrected") {
+      if (!filePath || !maybeOutputPath) {
+        throw new Error("Template JSON path and output SRT path are required.");
+      }
+      runWrite(filePath, maybeOutputPath, "corrected");
+      return;
+    }
+
+    if (command === "write-bilingual") {
+      if (!filePath || !maybeOutputPath) {
+        throw new Error("Template JSON path and output SRT path are required.");
+      }
+      runWrite(filePath, maybeOutputPath, "bilingual");
+      return;
+    }
+
+    if (command === "validate") {
+      if (!filePath) {
+        throw new Error("An SRT file path is required.");
+      }
+      runValidate(filePath, jsonMode);
+      return;
+    }
+
+    printUsage();
+    process.exitCode = 1;
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
 }
 
 main(process.argv);

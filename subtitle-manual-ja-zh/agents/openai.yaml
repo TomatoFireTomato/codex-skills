@@ -1,4 +1,4 @@
 interface:
   display_name: "Japanese Subtitle Manual Translator"
-  short_description: "Manually fix Japanese SRT and produce JP-ZH bilingual subtitles."
-  default_prompt: "Use $subtitle-manual-ja-zh to correct Japanese ASR subtitle errors and manually translate them into a Japanese-Chinese bilingual SRT."
+  short_description: "Manual JP subtitle correction and JP-ZH translation with mandatory Node.js file IO."
+  default_prompt: "Use $subtitle-manual-ja-zh to inspect the SRT with the bundled Node.js tool, export a template, manually correct the Japanese and translate into Chinese, then write and validate the final subtitle file with the Node.js tool."

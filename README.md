@@ -7,6 +7,7 @@ Custom Codex skills maintained in this repository.
 ### `subtitle-manual-ja-zh`
 
 Manually correct Japanese `.srt` subtitles and translate them into Japanese-Chinese bilingual subtitles.
+The agent must use the bundled Node.js script for subtitle file reading, template export, output writing, and validation.
 
 Use it for:
 - fixing likely ASR or Whisper subtitle errors
@@ -57,7 +58,7 @@ Once the skill is installed, ask Codex with wording like:
 
 ## Bundled Script
 
-This skill includes a reusable Node parser for SRT inspection:
+This skill includes a reusable Node.js toolchain for subtitle inspection, template export, output writing, and validation.
 
 ```bash
 node ~/.codex/skills/subtitle-manual-ja-zh/scripts/srt-tool.mjs inspect /path/to/file.srt
@@ -66,8 +67,26 @@ node ~/.codex/skills/subtitle-manual-ja-zh/scripts/srt-tool.mjs inspect /path/to
 Structured JSON output:
 
 ```bash
-node ~/.codex/skills/subtitle-manual-ja-zh/scripts/srt-tool.mjs inspect /path/to/file.srt --json
 node ~/.codex/skills/subtitle-manual-ja-zh/scripts/srt-tool.mjs dump-json /path/to/file.srt
+```
+
+Export a work template:
+
+```bash
+node ~/.codex/skills/subtitle-manual-ja-zh/scripts/srt-tool.mjs export-template /path/to/file.srt /path/to/work-template.json
+```
+
+Write corrected or bilingual subtitles:
+
+```bash
+node ~/.codex/skills/subtitle-manual-ja-zh/scripts/srt-tool.mjs write-corrected /path/to/work-template.json /path/to/output-corrected-ja.srt
+node ~/.codex/skills/subtitle-manual-ja-zh/scripts/srt-tool.mjs write-bilingual /path/to/work-template.json /path/to/output-bilingual.srt
+```
+
+Validate final output:
+
+```bash
+node ~/.codex/skills/subtitle-manual-ja-zh/scripts/srt-tool.mjs validate /path/to/output-bilingual.srt
 ```
 
 The script helps identify:
@@ -77,6 +96,13 @@ The script helps identify:
 - negative durations
 - suspiciously dense short blocks
 - fragmented or empty blocks
+
+The intended workflow is:
+- inspect source SRT with Node.js
+- export a JSON template with Node.js
+- manually fill `correctedJapanese` and `chinese`
+- write final `.srt` output with Node.js
+- validate final output with Node.js
 
 ## Update
 

@@ -1,6 +1,6 @@
 ---
 name: subtitle-manual-ja-zh
-description: Use when the user wants a Japanese subtitle file corrected and manually translated into a Japanese-Chinese bilingual SRT. Best for Whisper or ASR-generated `.srt` files where the job is to fix likely recognition errors from context, preserve or lightly repair timing, and write natural Chinese subtitles without using external translation APIs.
+description: Use when the user wants a Japanese subtitle file corrected and manually translated into a Japanese-Chinese bilingual SRT. This skill requires the agent to use the bundled Node.js script for all subtitle file reading, template export, output writing, and validation; only the Japanese correction and Chinese translation are done manually by the agent.
 ---
 
 # Subtitle Manual Ja Zh
@@ -10,11 +10,31 @@ description: Use when the user wants a Japanese subtitle file corrected and manu
 This skill is for Japanese subtitle cleanup and fully manual Chinese translation.
 
 Use it when we need to:
-- read a Japanese `.srt`
+- inspect a Japanese `.srt`
 - correct likely ASR mistakes from context
 - keep the subtitle timing unless it is clearly broken
 - produce a Japanese-Chinese bilingual `.srt`
 - avoid external translation APIs and translate by direct understanding
+
+## Required Execution Rule
+
+When this skill is active, the agent must use the bundled Node.js script for subtitle file operations.
+
+This is mandatory:
+- read source subtitle structure with the Node.js script
+- export the work template with the Node.js script
+- write corrected or bilingual subtitle files with the Node.js script
+- validate final subtitle files with the Node.js script
+
+Do not:
+- directly read the target subtitle file with `cat`, `sed`, `awk`, or ad hoc shell pipelines as the main workflow
+- directly write `.srt` output by manual shell redirection or freehand file editing
+- bypass the JSON template and write final subtitle blocks line by line by hand
+
+The only manual part is the language work:
+- correct the Japanese
+- translate the Chinese
+- unify names, titles, and terminology
 
 ## When To Use
 
@@ -32,40 +52,51 @@ Do not use this skill when:
 
 ## Workflow
 
-### 1. Inspect the source SRT
+### 1. Inspect the source SRT with Node.js
 
-Read the file first and confirm:
-- block count
-- whether lines are badly fragmented
-- whether there are obvious repeated lines, merged lines, or broken timestamps
-- whether the content is short enough to complete in one pass or should be processed in batches
-
-Prefer the bundled parser first:
+Start with the bundled script and do not substitute shell text tools for this step:
 
 ```bash
 node subtitle-manual-ja-zh/scripts/srt-tool.mjs inspect /path/to/file.srt
 ```
 
-Use `--json` when you want structured output for follow-up processing:
-
-```bash
-node subtitle-manual-ja-zh/scripts/srt-tool.mjs inspect /path/to/file.srt --json
-```
-
-Use `dump-json` when you want the full parsed block list:
+Use structured output when you need block-level data:
 
 ```bash
 node subtitle-manual-ja-zh/scripts/srt-tool.mjs dump-json /path/to/file.srt
 ```
 
-Fallback to fast local inspection tools such as `sed` and `rg` only when you need extra spot checks.
+Confirm:
+- block count
+- whether lines are badly fragmented
+- whether there are obvious repeated lines, merged lines, or broken timestamps
+- whether the content is short enough to complete in one pass or should be processed in batches
 
-### 2. Correct the Japanese line first
+### 2. Export the working JSON template
+
+Always create a template before doing manual subtitle work:
+
+```bash
+node subtitle-manual-ja-zh/scripts/srt-tool.mjs export-template /path/to/file.srt /path/to/work-template.json
+```
+
+The template is the only file the agent should manually edit for translation work.
+
+Expected editable fields per block:
+- `correctedJapanese`
+- `chinese`
+- `notes`
+
+Preserve:
+- `sequenceNumber`
+- `timecode`
+
+### 3. Correct the Japanese line manually
 
 For each subtitle block, treat the Japanese line as the source of truth to repair before translating.
 
 Fix:
-- obvious kana/kanji recognition mistakes
+- obvious kana or kanji recognition mistakes
 - merged or duplicated phrases
 - obvious speaker-name and title errors
 - broken punctuation when it affects meaning
@@ -78,7 +109,7 @@ Do not over-rewrite:
 
 If the user asked for stronger name validation, check official Japanese sources first. Japanese Wikipedia can be a fallback, but prioritize official pages when available.
 
-### 3. Translate into natural Chinese manually
+### 4. Translate into natural Chinese manually
 
 Translate from understanding, not by literal substitution.
 
@@ -94,15 +125,37 @@ Preferred translation behavior:
 - preserve speaker intent over word-for-word structure
 - keep references to brands, works, and people consistent across the full file
 
-### 4. Build the bilingual SRT
+### 5. Write the output SRT with Node.js
 
-Output each block as:
+For bilingual output:
+
+```bash
+node subtitle-manual-ja-zh/scripts/srt-tool.mjs write-bilingual /path/to/work-template.json /path/to/output-bilingual.srt
+```
+
+For Japanese-only corrected output:
+
+```bash
+node subtitle-manual-ja-zh/scripts/srt-tool.mjs write-corrected /path/to/work-template.json /path/to/output-corrected-ja.srt
+```
+
+The script writes each block in a normalized structure.
+
+Bilingual output format:
 
 ```text
 序号
 时间轴
 修正后的日文
 手工中文
+```
+
+Corrected-only output format:
+
+```text
+序号
+时间轴
+修正后的日文
 ```
 
 Keep the original timing unless it is clearly unreasonable.
@@ -113,21 +166,27 @@ Fix timing only when there is an obvious problem such as:
 - extremely short display time for a long sentence
 - clear timestamp corruption from ASR export
 
-### 5. Verify before finishing
+### 6. Validate the final output with Node.js
+
+Always validate the output file before finishing:
+
+```bash
+node subtitle-manual-ja-zh/scripts/srt-tool.mjs validate /path/to/output-bilingual.srt
+```
+
+Or:
+
+```bash
+node subtitle-manual-ja-zh/scripts/srt-tool.mjs validate /path/to/output-corrected-ja.srt
+```
 
 Confirm:
 - block numbering is sequential
-- every block has exactly 4 lines in the bilingual output
 - no blocks were dropped
 - the last block is intact
 - timing still parses as valid `SRT`
-
-Before starting manual translation work, use the script output to identify:
-- malformed numbering
-- invalid timestamps
-- overlaps and negative durations
-- suspiciously dense short subtitles
-- fragmented or empty blocks
+- bilingual output has exactly 2 text lines per block
+- corrected-only output has exactly 1 text line per block
 
 ## Naming Convention
 
@@ -141,7 +200,7 @@ Examples:
 
 If the user also wants a Japanese-only corrected file, use a parallel corrected name such as:
 - `transcript-raw-corrected (2).srt`
-- or `transcript-corrected-ja (2).srt`
+- `transcript-corrected-ja (2).srt`
 
 Preserve the user's established naming style if earlier files in the same batch already imply one.
 
@@ -161,12 +220,12 @@ If some lines remain uncertain because the source itself is garbled, make the mo
 ## Communication
 
 When using this skill, tell the user briefly:
-- that you are first inspecting the subtitle structure
-- then correcting likely Japanese recognition mistakes
-- then writing a fully manual Chinese translation
+- that you are first inspecting the subtitle structure with the Node.js tool
+- then exporting a template and manually correcting and translating it
+- then writing and validating the final subtitle file with the Node.js tool
 
 In the final response, keep it short and include:
 - the output file path
 - whether timing was preserved or lightly repaired
-- whether names/titles were unified
+- whether names or titles were unified
 - whether any small uncertain spots remain because of source quality
