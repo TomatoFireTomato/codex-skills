@@ -74,6 +74,7 @@ Run the subtitle tool from the repository with:
 
 ```bash
 node plugins/japanese-whisper-subtitle-repair/skills/subtitle-manual-ja-zh/scripts/srt-tool.mjs inspect /path/to/file.srt
+node plugins/japanese-whisper-subtitle-repair/skills/subtitle-manual-ja-zh/scripts/srt-tool.mjs analyze-silence /path/to/file.srt /path/to/audio-or-video /path/to/silence-report.json
 ```
 
 Validate before publishing:

@@ -27,6 +27,7 @@ node "<skill-dir>/scripts/srt-tool.mjs" audit-template /path/to/work.json
 node "<skill-dir>/scripts/srt-tool.mjs" write-corrected /path/to/work.json /path/to/corrected-ja.srt
 node "<skill-dir>/scripts/srt-tool.mjs" validate /path/to/corrected-ja.srt
 node "<skill-dir>/scripts/srt-tool.mjs" compare /path/to/raw.srt /path/to/corrected-ja.srt
+node "<skill-dir>/scripts/srt-tool.mjs" analyze-silence /path/to/raw.srt /path/to/audio-or-video /path/to/silence-report.json
 ```
 
 ## Evidence Hierarchy
@@ -123,13 +124,27 @@ Do not reconstruct missing speech from imagination or convert speech into polish
 
 If audio or video is available, review high-risk timestamps first. Replay with headphones, slower playback, and short loops when needed. Check surrounding audio to avoid clipping syllables at subtitle boundaries.
 
-When local Whisper tooling is already available, optionally re-decode only high-risk spans using Japanese language lock, a stronger local model, glossary terms in the initial prompt, and more than one decoding setting. Preserve competing results in `candidateReadings`. Treat alternate ASR hypotheses as evidence, not truth. Do not call external ASR or transcription APIs.
+An existing Whisper SRT is already an ASR result. Do not search for, download, install, or benchmark another ASR model by default. First use the supplied subtitle, official sources, contextual review, and direct listening of flagged timestamps. Do not spend task time reporting that no ASR model is installed when retranscription was not requested.
+
+Use secondary ASR only when the user explicitly requests retranscription or when compatible local ASR tooling is already installed and a targeted high-risk span remains unresolved after listening. Re-decode only those spans using Japanese language lock, glossary terms, and more than one decoding setting. Preserve competing results in `candidateReadings`. Treat alternate ASR hypotheses as evidence, not truth. Never call external ASR APIs or install a model without explicit user approval.
 
 When alignment tooling is already available, use forced alignment or word timestamps to detect missing speech, clipped morae, and words split across blocks. Do not install large models or tools unless the user asks or the environment already supports them.
 
 If audio channels differ, compare clean speech channels before accepting a correction. Account for music, applause, overlapping speakers, echo, and audience noise.
 
 If no audio is available, make only high-confidence text-level repairs and report that phonetic verification was not possible.
+
+### 6a. Repair Timing Against Silence
+
+Preserve source timing unless the user asks for audio-based timing repair or subtitles visibly remain on screen without corresponding sound. If local `ffmpeg` and `ffprobe` are already available, run `analyze-silence` to produce a JSON report. Do not install them automatically.
+
+Use the report as triage, not an automatic edit:
+- `leading-silence` or `trailing-silence`: listen at the boundary, then apply `suggestedTimecode` only if speech actually starts or ends there
+- `subtitle-fully-in-silence`: treat it as a possible hallucination, offset, or wrong media match; review before removing or retiming the block
+- `large-*-silence-offset`: investigate global offset or mismatched media instead of trimming blindly
+- `trim-would-be-too-short`: keep the source timing until a human-audible boundary is confirmed
+
+Amplitude silence is not voice activity. Background music, applause, room noise, and overlapping speakers may produce continuous non-silence with no dialogue. When these are present, use direct listening or already-available VAD/forced-alignment evidence. Do not obtain a VAD model without user approval. Record accepted timestamp edits as `changeTypes: ["timing"]`, preserve the original timecode in evidence or notes, and verify them with `compare`.
 
 ### 7. Apply Confidence and Change Discipline
 
@@ -219,6 +234,7 @@ Report:
 - raw and output block counts and whether they match
 - numbering, final-block, and timestamp validation results
 - whether original timing was preserved and what timing repairs were made
+- whether silence analysis was used, its threshold, and which suggestions were accepted or rejected
 - remaining low-confidence blocks, high-risk terms, garbled symbols, or oversized blocks
 - official sources used for proper-name normalization
 - whether audio was reviewed or correction was text-only
@@ -230,4 +246,4 @@ Report:
 
 ## Communication
 
-Tell the user briefly that you will inspect structure and ASR risks, research official names, correct Japanese using the strongest available evidence, and validate the corrected SRT. Do not mention translation or bilingual output.
+Tell the user briefly that you will inspect structure and ASR risks, research official names, correct Japanese using the strongest available evidence, and validate the corrected SRT. When audio is supplied, say whether you will perform direct listening and optional silence-based timing review. Do not announce a search for ASR models, and do not mention translation or bilingual output.

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import crypto from "crypto";
+import { spawnSync } from "node:child_process";
 import fs from "fs";
 import path from "path";
 
@@ -48,6 +49,12 @@ function printUsage() {
   node <skill-dir>/scripts/srt-tool.mjs write-corrected <template.json> <output.srt>
   node <skill-dir>/scripts/srt-tool.mjs validate <file.srt> [--json]
   node <skill-dir>/scripts/srt-tool.mjs compare <source.srt> <corrected.srt> [--json]
+  node <skill-dir>/scripts/srt-tool.mjs analyze-silence <file.srt> <audio-or-video> <output.json> [options]
+
+Silence analysis options:
+  --noise-db <number>      Silence threshold in dB (default: -35).
+  --min-silence <seconds>  Minimum silence duration (default: 0.20).
+  --max-trim-ms <ms>       Maximum suggested edge trim (default: 1500).
 
 Commands:
   inspect          Summarize structure and flag likely ASR risks.
@@ -57,6 +64,7 @@ Commands:
   write-corrected  Write a reviewed Japanese-only corrected SRT.
   validate         Validate a Japanese-only corrected SRT.
   compare          Compare source and output block counts, timing, and text changes.
+  analyze-silence  Use local ffmpeg/ffprobe to suggest auditable timing repairs.
 `);
 }
 
@@ -100,6 +108,196 @@ function msToSrt(ms) {
   const ss = String(Math.floor((absolute % 60000) / 1000)).padStart(2, "0");
   const mmm = String(absolute % 1000).padStart(3, "0");
   return `${sign}${hh}:${mm}:${ss},${mmm}`;
+}
+
+function parseNumericOption(args, name, defaultValue) {
+  const index = args.indexOf(name);
+  if (index === -1) {
+    return defaultValue;
+  }
+  const value = Number(args[index + 1]);
+  if (!Number.isFinite(value)) {
+    throw new Error(`${name} requires a numeric value.`);
+  }
+  return value;
+}
+
+function parseSilenceOptions(args) {
+  const allowed = new Set(["--noise-db", "--min-silence", "--max-trim-ms"]);
+  for (let index = 0; index < args.length; index += 2) {
+    if (!allowed.has(args[index])) {
+      throw new Error(`Unsupported silence analysis option: ${args[index] || "<empty>"}`);
+    }
+    if (args[index + 1] === undefined) {
+      throw new Error(`${args[index]} requires a value.`);
+    }
+  }
+  const options = {
+    noiseDb: parseNumericOption(args, "--noise-db", -35),
+    minSilenceSeconds: parseNumericOption(args, "--min-silence", 0.2),
+    maxTrimMs: parseNumericOption(args, "--max-trim-ms", 1500),
+    minDisplayMs: 500,
+  };
+  if (options.minSilenceSeconds <= 0) {
+    throw new Error("--min-silence must be greater than 0.");
+  }
+  if (options.maxTrimMs < 0) {
+    throw new Error("--max-trim-ms must be 0 or greater.");
+  }
+  return options;
+}
+
+function runMediaTool(executable, args, label) {
+  const result = spawnSync(executable, args, { encoding: "utf8" });
+  if (result.error?.code === "ENOENT") {
+    throw new Error(
+      `${label} is not installed. Do not search for or install it automatically; continue with manual audio review or ask the user for permission.`
+    );
+  }
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout || "unknown error").trim();
+    throw new Error(`${label} failed: ${detail}`);
+  }
+  return result;
+}
+
+function probeDurationMs(mediaPath) {
+  const executable = process.env.FFPROBE_PATH || "ffprobe";
+  const result = runMediaTool(
+    executable,
+    [
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      mediaPath,
+    ],
+    "ffprobe"
+  );
+  const durationSeconds = Number(result.stdout.trim());
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    throw new Error("ffprobe did not return a valid media duration.");
+  }
+  return Math.round(durationSeconds * 1000);
+}
+
+function detectSilenceIntervals(mediaPath, durationMs, noiseDb, minSilenceSeconds) {
+  const executable = process.env.FFMPEG_PATH || "ffmpeg";
+  const result = runMediaTool(
+    executable,
+    [
+      "-hide_banner",
+      "-nostats",
+      "-i",
+      mediaPath,
+      "-af",
+      `silencedetect=noise=${noiseDb}dB:d=${minSilenceSeconds}`,
+      "-f",
+      "null",
+      "-",
+    ],
+    "ffmpeg"
+  );
+  const intervals = [];
+  const eventPattern = /silence_(start|end):\s*(-?\d+(?:\.\d+)?)/gu;
+  let activeStartMs = null;
+  let match;
+
+  while ((match = eventPattern.exec(result.stderr)) !== null) {
+    const valueMs = Math.max(0, Math.round(Number(match[2]) * 1000));
+    if (match[1] === "start") {
+      activeStartMs = valueMs;
+    } else if (activeStartMs !== null) {
+      intervals.push({ startMs: activeStartMs, endMs: Math.min(valueMs, durationMs) });
+      activeStartMs = null;
+    }
+  }
+  if (activeStartMs !== null && activeStartMs < durationMs) {
+    intervals.push({ startMs: activeStartMs, endMs: durationMs });
+  }
+
+  return intervals.filter((interval) => interval.endMs > interval.startMs);
+}
+
+function findContainingSilence(intervals, timestampMs) {
+  return intervals.find(
+    (interval) => interval.startMs <= timestampMs && timestampMs <= interval.endMs
+  );
+}
+
+function buildSilenceTimingReport(blocks, intervals, settings) {
+  const findings = [];
+
+  for (const block of blocks) {
+    if (block.start === null || block.end === null || block.durationMs <= 0) {
+      continue;
+    }
+    const fullySilent = intervals.some(
+      (interval) => interval.startMs <= block.start && interval.endMs >= block.end
+    );
+    const startSilence = findContainingSilence(intervals, block.start);
+    const endSilence = findContainingSilence(intervals, block.end);
+    let suggestedStart = block.start;
+    let suggestedEnd = block.end;
+    const issues = [];
+
+    if (fullySilent) {
+      issues.push("subtitle-fully-in-silence");
+    } else {
+      if (startSilence && startSilence.endMs > block.start && startSilence.endMs < block.end) {
+        const trimMs = startSilence.endMs - block.start;
+        if (trimMs <= settings.maxTrimMs) {
+          suggestedStart = startSilence.endMs;
+          issues.push("leading-silence");
+        } else {
+          issues.push("large-leading-silence-offset");
+        }
+      }
+      if (endSilence && endSilence.startMs > block.start && endSilence.startMs < block.end) {
+        const trimMs = block.end - endSilence.startMs;
+        if (trimMs <= settings.maxTrimMs) {
+          suggestedEnd = endSilence.startMs;
+          issues.push("trailing-silence");
+        } else {
+          issues.push("large-trailing-silence-offset");
+        }
+      }
+    }
+
+    if (suggestedEnd - suggestedStart < settings.minDisplayMs) {
+      suggestedStart = block.start;
+      suggestedEnd = block.end;
+      issues.push("trim-would-be-too-short");
+    }
+    if (issues.length === 0) {
+      continue;
+    }
+
+    const timingChanged = suggestedStart !== block.start || suggestedEnd !== block.end;
+    findings.push({
+      blockIndex: block.blockIndex,
+      sourceTimecode: block.timecode,
+      issues,
+      fullySilent,
+      suggestedTimecode: timingChanged
+        ? `${msToSrt(suggestedStart)} --> ${msToSrt(suggestedEnd)}`
+        : null,
+      leadingTrimMs: suggestedStart - block.start,
+      trailingTrimMs: block.end - suggestedEnd,
+      recommendation: fullySilent
+        ? "review-remove-or-retime"
+        : timingChanged
+          ? "review-suggested-timecode"
+          : "manual-review",
+    });
+  }
+
+  return findings;
 }
 
 function normalizeNewlines(text) {
@@ -824,6 +1022,52 @@ function runCompare(sourcePath, outputPath, jsonMode) {
   }
 }
 
+function runAnalyzeSilence(srtPath, mediaPath, outputPath, optionArgs) {
+  if (!fs.existsSync(srtPath)) {
+    throw new Error(`SRT file does not exist: ${path.resolve(srtPath)}`);
+  }
+  if (!fs.existsSync(mediaPath)) {
+    throw new Error(`Audio or video file does not exist: ${path.resolve(mediaPath)}`);
+  }
+  const settings = parseSilenceOptions(optionArgs);
+  const blocks = parseSrt(readText(srtPath));
+  const durationMs = probeDurationMs(mediaPath);
+  const silenceIntervals = detectSilenceIntervals(
+    mediaPath,
+    durationMs,
+    settings.noiseDb,
+    settings.minSilenceSeconds
+  );
+  const findings = buildSilenceTimingReport(blocks, silenceIntervals, settings);
+  const report = {
+    schemaVersion: 1,
+    sourceSrt: path.resolve(srtPath),
+    mediaFile: path.resolve(mediaPath),
+    generatedAt: new Date().toISOString(),
+    durationMs,
+    settings,
+    limitations: [
+      "Amplitude silence is not the same as absence of speech.",
+      "Background music or noise can hide speech-free regions.",
+      "Suggestions require listening review before changing timestamps or removing blocks.",
+    ],
+    summary: {
+      blockCount: blocks.length,
+      silenceIntervalCount: silenceIntervals.length,
+      findingCount: findings.length,
+      fullySilentBlockCount: findings.filter((finding) => finding.fullySilent).length,
+      suggestedTimingCount: findings.filter((finding) => finding.suggestedTimecode).length,
+    },
+    silenceIntervals,
+    findings,
+  };
+  writeText(outputPath, `${JSON.stringify(report, null, 2)}\n`);
+  console.log(`Silence timing report written: ${path.resolve(outputPath)}`);
+  console.log(`Findings: ${report.summary.findingCount}`);
+  console.log(`Fully silent blocks: ${report.summary.fullySilentBlockCount}`);
+  console.log(`Timing suggestions: ${report.summary.suggestedTimingCount}`);
+}
+
 function main(argv) {
   const [command, ...args] = argv.slice(2);
   const jsonMode = args.includes("--json");
@@ -870,6 +1114,14 @@ function main(argv) {
         throw new Error("Source and corrected SRT paths are required.");
       }
       runCompare(positionals[0], positionals[1], jsonMode);
+      return;
+    }
+    if (command === "analyze-silence") {
+      const [srtPath, mediaPath, outputPath, ...optionArgs] = args;
+      if (!srtPath || !mediaPath || !outputPath) {
+        throw new Error("SRT, audio/video, and output JSON paths are required.");
+      }
+      runAnalyzeSilence(srtPath, mediaPath, outputPath, optionArgs);
       return;
     }
 
