@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 import crypto from "crypto";
-import { spawnSync } from "node:child_process";
 import fs from "fs";
+import os from "node:os";
 import path from "path";
 
 const TIMECODE_PATTERN = /^(\d{2}:\d{2}:\d{2},\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2},\d{3})$/;
@@ -14,7 +14,6 @@ const EVIDENCE_TYPES = new Set([
   "context-inferred",
   "phonetic-analysis",
   "grammar-only",
-  "alternate-asr",
   "speaker-profile",
   "reference-subtitle",
   "unresolved",
@@ -27,7 +26,6 @@ const CHANGE_TYPES = new Set([
   "segmentation",
   "hallucination",
   "duplicate",
-  "timing",
   "speaker-label",
   "other",
 ]);
@@ -39,32 +37,50 @@ const AUDIO_REVIEW_STATUSES = new Set([
 ]);
 const OVERCORRECTION_REVIEW_STATUSES = new Set(["not-reviewed", "pass", "unresolved"]);
 const ISSUE_WEIGHTS = { high: 5, medium: 2, low: 1 };
+const WORKFLOW_PHASES = ["triage", "initial-reviewed", "drafted", "reverse-reviewed", "frozen"];
+const STRICT_TIMELINE_POLICY = "preserve-source-exactly";
+const AUDIO_CRITICAL_RISK_FLAGS = new Set([
+  "garbled-character",
+  "possible-hallucination-loop",
+  "duplicate-consecutive-text",
+  "duplicate-nearby-text",
+  "flash-duplicate-ahead",
+]);
+const AUDIO_CRITICAL_CHANGE_TYPES = new Set([
+  "asr-homophone",
+  "hallucination",
+  "duplicate",
+]);
+const WORKSPACE_ROOT = path.join(os.tmpdir(), "japanese-whisper-subtitle-repair");
+const WORKSPACE_MARKER = ".srt-repair-workspace.json";
+const WORKSPACE_CREATED_BY = "japanese-whisper-subtitle-repair/srt-tool.mjs";
 
 function printUsage() {
   console.log(`Usage:
   node <skill-dir>/scripts/srt-tool.mjs inspect <file.srt> [--json]
-  node <skill-dir>/scripts/srt-tool.mjs dump-json <file.srt>
+  node <skill-dir>/scripts/srt-tool.mjs dump-json <file.srt> [output.json]
+  node <skill-dir>/scripts/srt-tool.mjs create-workdir [label]
+  node <skill-dir>/scripts/srt-tool.mjs cleanup-workdir <directory>
   node <skill-dir>/scripts/srt-tool.mjs export-template <file.srt> <output.json>
+  node <skill-dir>/scripts/srt-tool.mjs accept-low-risk <template.json>
+  node <skill-dir>/scripts/srt-tool.mjs advance-workflow <template.json> <phase>
   node <skill-dir>/scripts/srt-tool.mjs audit-template <template.json> [--json]
   node <skill-dir>/scripts/srt-tool.mjs write-corrected <template.json> <output.srt>
   node <skill-dir>/scripts/srt-tool.mjs validate <file.srt> [--json]
-  node <skill-dir>/scripts/srt-tool.mjs compare <source.srt> <corrected.srt> [--json]
-  node <skill-dir>/scripts/srt-tool.mjs analyze-silence <file.srt> <audio-or-video> <output.json> [options]
-
-Silence analysis options:
-  --noise-db <number>      Silence threshold in dB (default: -35).
-  --min-silence <seconds>  Minimum silence duration (default: 0.20).
-  --max-trim-ms <ms>       Maximum suggested edge trim (default: 1500).
+  node <skill-dir>/scripts/srt-tool.mjs compare <source.srt> <corrected.srt> [output.json] [--json]
 
 Commands:
   inspect          Summarize structure and flag likely ASR risks.
   dump-json        Output parsed blocks, summary, and risk findings as JSON.
+  create-workdir   Create a marked task directory below the system temp directory.
+  cleanup-workdir  Safely remove a marked task directory created by this tool.
   export-template  Export a correction template with risk and confidence fields.
+  accept-low-risk  Batch-dispose unchanged blocks with no detected risk flags.
+  advance-workflow Move a schema-v4+ template to its next bounded workflow phase.
   audit-template   Audit review coverage, confidence, and raw/corrected changes.
   write-corrected  Write a reviewed Japanese-only corrected SRT.
   validate         Validate a Japanese-only corrected SRT.
   compare          Compare source and output block counts, timing, and text changes.
-  analyze-silence  Use local ffmpeg/ffprobe to suggest auditable timing repairs.
 `);
 }
 
@@ -80,6 +96,59 @@ function readText(filePath) {
 function writeText(filePath, text) {
   fs.mkdirSync(path.dirname(path.resolve(filePath)), { recursive: true });
   fs.writeFileSync(filePath, text, "utf8");
+}
+
+function sanitizeWorkspaceLabel(value) {
+  const sanitized = String(value || "task")
+    .normalize("NFKC")
+    .replace(/[^\p{L}\p{N}._-]+/gu, "-")
+    .replace(/^-+|-+$/gu, "")
+    .slice(0, 48);
+  return sanitized || "task";
+}
+
+function runCreateWorkdir(label) {
+  fs.mkdirSync(WORKSPACE_ROOT, { recursive: true });
+  const prefix = `${sanitizeWorkspaceLabel(label)}-`;
+  const directory = fs.mkdtempSync(path.join(WORKSPACE_ROOT, prefix));
+  const runtimeScript = path.join(directory, "srt-tool.mjs");
+  fs.copyFileSync(fs.realpathSync(process.argv[1]), runtimeScript);
+  fs.chmodSync(runtimeScript, 0o755);
+  const marker = {
+    schemaVersion: 1,
+    createdBy: WORKSPACE_CREATED_BY,
+    createdAt: new Date().toISOString(),
+    runtimeScript,
+    runtimeSha256: sha256(readText(runtimeScript)),
+  };
+  writeText(path.join(directory, WORKSPACE_MARKER), `${JSON.stringify(marker, null, 2)}\n`);
+  console.log(directory);
+}
+
+function assertManagedWorkdir(directory) {
+  const resolvedRoot = path.resolve(WORKSPACE_ROOT);
+  const resolvedDirectory = path.resolve(directory);
+  if (resolvedDirectory === resolvedRoot || path.dirname(resolvedDirectory) !== resolvedRoot) {
+    throw new Error(`Refusing to clean an unmanaged directory: ${resolvedDirectory}`);
+  }
+  if (!fs.existsSync(resolvedDirectory) || fs.lstatSync(resolvedDirectory).isSymbolicLink()) {
+    throw new Error(`Managed work directory does not exist: ${resolvedDirectory}`);
+  }
+  const markerPath = path.join(resolvedDirectory, WORKSPACE_MARKER);
+  if (!fs.existsSync(markerPath) || !fs.lstatSync(markerPath).isFile()) {
+    throw new Error(`Refusing to clean a directory without ${WORKSPACE_MARKER}.`);
+  }
+  const marker = readJson(markerPath);
+  if (marker.createdBy !== WORKSPACE_CREATED_BY || marker.schemaVersion !== 1) {
+    throw new Error("Refusing to clean a directory with an invalid workspace marker.");
+  }
+  return resolvedDirectory;
+}
+
+function runCleanupWorkdir(directory) {
+  const resolvedDirectory = assertManagedWorkdir(directory);
+  fs.rmSync(resolvedDirectory, { recursive: true, force: false });
+  console.log(`Removed temporary workspace: ${resolvedDirectory}`);
 }
 
 function readJson(filePath) {
@@ -108,196 +177,6 @@ function msToSrt(ms) {
   const ss = String(Math.floor((absolute % 60000) / 1000)).padStart(2, "0");
   const mmm = String(absolute % 1000).padStart(3, "0");
   return `${sign}${hh}:${mm}:${ss},${mmm}`;
-}
-
-function parseNumericOption(args, name, defaultValue) {
-  const index = args.indexOf(name);
-  if (index === -1) {
-    return defaultValue;
-  }
-  const value = Number(args[index + 1]);
-  if (!Number.isFinite(value)) {
-    throw new Error(`${name} requires a numeric value.`);
-  }
-  return value;
-}
-
-function parseSilenceOptions(args) {
-  const allowed = new Set(["--noise-db", "--min-silence", "--max-trim-ms"]);
-  for (let index = 0; index < args.length; index += 2) {
-    if (!allowed.has(args[index])) {
-      throw new Error(`Unsupported silence analysis option: ${args[index] || "<empty>"}`);
-    }
-    if (args[index + 1] === undefined) {
-      throw new Error(`${args[index]} requires a value.`);
-    }
-  }
-  const options = {
-    noiseDb: parseNumericOption(args, "--noise-db", -35),
-    minSilenceSeconds: parseNumericOption(args, "--min-silence", 0.2),
-    maxTrimMs: parseNumericOption(args, "--max-trim-ms", 1500),
-    minDisplayMs: 500,
-  };
-  if (options.minSilenceSeconds <= 0) {
-    throw new Error("--min-silence must be greater than 0.");
-  }
-  if (options.maxTrimMs < 0) {
-    throw new Error("--max-trim-ms must be 0 or greater.");
-  }
-  return options;
-}
-
-function runMediaTool(executable, args, label) {
-  const result = spawnSync(executable, args, { encoding: "utf8" });
-  if (result.error?.code === "ENOENT") {
-    throw new Error(
-      `${label} is not installed. Do not search for or install it automatically; continue with manual audio review or ask the user for permission.`
-    );
-  }
-  if (result.error) {
-    throw result.error;
-  }
-  if (result.status !== 0) {
-    const detail = (result.stderr || result.stdout || "unknown error").trim();
-    throw new Error(`${label} failed: ${detail}`);
-  }
-  return result;
-}
-
-function probeDurationMs(mediaPath) {
-  const executable = process.env.FFPROBE_PATH || "ffprobe";
-  const result = runMediaTool(
-    executable,
-    [
-      "-v",
-      "error",
-      "-show_entries",
-      "format=duration",
-      "-of",
-      "default=noprint_wrappers=1:nokey=1",
-      mediaPath,
-    ],
-    "ffprobe"
-  );
-  const durationSeconds = Number(result.stdout.trim());
-  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
-    throw new Error("ffprobe did not return a valid media duration.");
-  }
-  return Math.round(durationSeconds * 1000);
-}
-
-function detectSilenceIntervals(mediaPath, durationMs, noiseDb, minSilenceSeconds) {
-  const executable = process.env.FFMPEG_PATH || "ffmpeg";
-  const result = runMediaTool(
-    executable,
-    [
-      "-hide_banner",
-      "-nostats",
-      "-i",
-      mediaPath,
-      "-af",
-      `silencedetect=noise=${noiseDb}dB:d=${minSilenceSeconds}`,
-      "-f",
-      "null",
-      "-",
-    ],
-    "ffmpeg"
-  );
-  const intervals = [];
-  const eventPattern = /silence_(start|end):\s*(-?\d+(?:\.\d+)?)/gu;
-  let activeStartMs = null;
-  let match;
-
-  while ((match = eventPattern.exec(result.stderr)) !== null) {
-    const valueMs = Math.max(0, Math.round(Number(match[2]) * 1000));
-    if (match[1] === "start") {
-      activeStartMs = valueMs;
-    } else if (activeStartMs !== null) {
-      intervals.push({ startMs: activeStartMs, endMs: Math.min(valueMs, durationMs) });
-      activeStartMs = null;
-    }
-  }
-  if (activeStartMs !== null && activeStartMs < durationMs) {
-    intervals.push({ startMs: activeStartMs, endMs: durationMs });
-  }
-
-  return intervals.filter((interval) => interval.endMs > interval.startMs);
-}
-
-function findContainingSilence(intervals, timestampMs) {
-  return intervals.find(
-    (interval) => interval.startMs <= timestampMs && timestampMs <= interval.endMs
-  );
-}
-
-function buildSilenceTimingReport(blocks, intervals, settings) {
-  const findings = [];
-
-  for (const block of blocks) {
-    if (block.start === null || block.end === null || block.durationMs <= 0) {
-      continue;
-    }
-    const fullySilent = intervals.some(
-      (interval) => interval.startMs <= block.start && interval.endMs >= block.end
-    );
-    const startSilence = findContainingSilence(intervals, block.start);
-    const endSilence = findContainingSilence(intervals, block.end);
-    let suggestedStart = block.start;
-    let suggestedEnd = block.end;
-    const issues = [];
-
-    if (fullySilent) {
-      issues.push("subtitle-fully-in-silence");
-    } else {
-      if (startSilence && startSilence.endMs > block.start && startSilence.endMs < block.end) {
-        const trimMs = startSilence.endMs - block.start;
-        if (trimMs <= settings.maxTrimMs) {
-          suggestedStart = startSilence.endMs;
-          issues.push("leading-silence");
-        } else {
-          issues.push("large-leading-silence-offset");
-        }
-      }
-      if (endSilence && endSilence.startMs > block.start && endSilence.startMs < block.end) {
-        const trimMs = block.end - endSilence.startMs;
-        if (trimMs <= settings.maxTrimMs) {
-          suggestedEnd = endSilence.startMs;
-          issues.push("trailing-silence");
-        } else {
-          issues.push("large-trailing-silence-offset");
-        }
-      }
-    }
-
-    if (suggestedEnd - suggestedStart < settings.minDisplayMs) {
-      suggestedStart = block.start;
-      suggestedEnd = block.end;
-      issues.push("trim-would-be-too-short");
-    }
-    if (issues.length === 0) {
-      continue;
-    }
-
-    const timingChanged = suggestedStart !== block.start || suggestedEnd !== block.end;
-    findings.push({
-      blockIndex: block.blockIndex,
-      sourceTimecode: block.timecode,
-      issues,
-      fullySilent,
-      suggestedTimecode: timingChanged
-        ? `${msToSrt(suggestedStart)} --> ${msToSrt(suggestedEnd)}`
-        : null,
-      leadingTrimMs: suggestedStart - block.start,
-      trailingTrimMs: block.end - suggestedEnd,
-      recommendation: fullySilent
-        ? "review-remove-or-retime"
-        : timingChanged
-          ? "review-suggested-timecode"
-          : "manual-review",
-    });
-  }
-
-  return findings;
 }
 
 function normalizeNewlines(text) {
@@ -563,21 +442,60 @@ function riskScoreForIssues(issues) {
   );
 }
 
+function requiresAudioReview(block) {
+  const hasAuthoritativeTextEvidence = block.evidence?.some((item) =>
+    item && typeof item === "object" && ["official-transcript", "official-name"].includes(item.type)
+  );
+  const hasCriticalRisk = block.riskFlags?.some((flag) => AUDIO_CRITICAL_RISK_FLAGS.has(flag));
+  const hasCriticalNonHomophoneChange = block.changeTypes?.some((type) =>
+    ["hallucination", "duplicate"].includes(type)
+  );
+  if (
+    hasAuthoritativeTextEvidence &&
+    !hasCriticalRisk &&
+    !hasCriticalNonHomophoneChange &&
+    !(block.candidateReadings?.length > 1)
+  ) {
+    return false;
+  }
+  return (
+    block.candidateReadings?.length > 1 ||
+    hasCriticalRisk ||
+    block.changeTypes?.some((type) => AUDIO_CRITICAL_CHANGE_TYPES.has(type))
+  );
+}
+
+function correctedContentSha256(template) {
+  const content = template.blocks.map((block) => ({
+    blockIndex: block.blockIndex,
+    timecode: block.timecode,
+    correctedJapanese: block.correctedJapanese,
+  }));
+  return sha256(JSON.stringify(content));
+}
+
 function exportTemplate(sourceText, blocks, sourcePath) {
   const issues = collectIssues(blocks);
   const blockRisks = issuesByBlock(issues);
+  const generatedAt = new Date().toISOString();
 
   return {
-    schemaVersion: 3,
+    schemaVersion: 5,
     sourceFile: path.resolve(sourcePath),
     sourceSha256: sha256(sourceText),
-    generatedAt: new Date().toISOString(),
+    timingPolicy: STRICT_TIMELINE_POLICY,
+    generatedAt,
     blockCount: blocks.length,
     audioAvailable: null,
     audioSource: "",
     speakers: [],
     glossary: [],
     systematicPatterns: [],
+    workflow: {
+      phase: "triage",
+      history: [{ phase: "triage", at: generatedAt }],
+      frozenContentSha256: "",
+    },
     blocks: blocks.map((block) => {
       const blockIssues = blockRisks.get(block.blockIndex) || [];
       return {
@@ -651,9 +569,66 @@ function validateReviewField(label, review, allowedStatuses) {
   }
 }
 
+function inspectStrictTimeline(template) {
+  if (Number(template.schemaVersion) < 5) {
+    return {
+      policy: "legacy",
+      preserved: null,
+      issues: [],
+    };
+  }
+
+  const issues = [];
+  if (template.timingPolicy !== STRICT_TIMELINE_POLICY) {
+    issues.push(`timingPolicy must be ${STRICT_TIMELINE_POLICY}.`);
+  }
+  if (!template.sourceFile || !fs.existsSync(template.sourceFile)) {
+    issues.push("Source SRT is unavailable for strict timeline verification.");
+    return { policy: template.timingPolicy, preserved: false, issues };
+  }
+  if (getSourceIntegrity(template) !== "match") {
+    issues.push("Source SRT changed after template export.");
+    return { policy: template.timingPolicy, preserved: false, issues };
+  }
+
+  const sourceBlocks = parseSrt(readText(template.sourceFile));
+  if (template.blocks.length !== sourceBlocks.length) {
+    issues.push(
+      `Block count changed: source=${sourceBlocks.length}, template=${template.blocks.length}.`
+    );
+  }
+  if (template.blockCount !== sourceBlocks.length) {
+    issues.push(
+      `Recorded blockCount does not match source: source=${sourceBlocks.length}, template=${template.blockCount}.`
+    );
+  }
+
+  const sharedCount = Math.min(template.blocks.length, sourceBlocks.length);
+  for (let index = 0; index < sharedCount; index += 1) {
+    const block = template.blocks[index];
+    const source = sourceBlocks[index];
+    if (block.blockIndex !== index + 1) {
+      issues.push(`Block order changed at template position ${index + 1}.`);
+    }
+    if (block.timecode !== source.timecode) {
+      issues.push(
+        `Block ${index + 1} timecode changed: ${source.timecode} -> ${block.timecode}.`
+      );
+    }
+  }
+
+  return {
+    policy: template.timingPolicy,
+    preserved: issues.length === 0,
+    issues,
+  };
+}
+
 function validateTemplateBlocks(template, requireReviewed = false) {
   assertTemplateShape(template);
   const structuredReview = Number(template.schemaVersion) >= 3;
+  const boundedWorkflow = Number(template.schemaVersion) >= 4;
+  const strictTimeline = Number(template.schemaVersion) >= 5;
 
   if (structuredReview) {
     if (![null, true, false].includes(template.audioAvailable)) {
@@ -671,6 +646,44 @@ function validateTemplateBlocks(template, requireReviewed = false) {
   if (structuredReview && requireReviewed && typeof template.audioAvailable !== "boolean") {
     throw new Error("audioAvailable must be set to true or false before writing output.");
   }
+  if (boundedWorkflow) {
+    if (!template.workflow || typeof template.workflow !== "object" || Array.isArray(template.workflow)) {
+      throw new Error("workflow must be an object for schema v4 templates.");
+    }
+    if (!WORKFLOW_PHASES.includes(template.workflow.phase)) {
+      throw new Error("workflow.phase is not supported.");
+    }
+    if (!Array.isArray(template.workflow.history)) {
+      throw new Error("workflow.history must be an array.");
+    }
+    const expectedHistory = WORKFLOW_PHASES.slice(
+      0,
+      WORKFLOW_PHASES.indexOf(template.workflow.phase) + 1
+    );
+    const actualHistory = template.workflow.history.map((entry) => entry?.phase);
+    if (
+      actualHistory.length !== expectedHistory.length ||
+      actualHistory.some((phase, index) => phase !== expectedHistory[index]) ||
+      template.workflow.history.some((entry) => typeof entry?.at !== "string" || !entry.at.trim())
+    ) {
+      throw new Error("workflow.history must contain each phase exactly once in order.");
+    }
+    if (typeof template.workflow.frozenContentSha256 !== "string") {
+      throw new Error("workflow.frozenContentSha256 must be a string.");
+    }
+    if (requireReviewed && template.workflow.phase !== "frozen") {
+      throw new Error("workflow must be frozen before writing output.");
+    }
+    if (
+      template.workflow.phase === "frozen" &&
+      template.workflow.frozenContentSha256 !== correctedContentSha256(template)
+    ) {
+      throw new Error("Corrected text or timing changed after workflow freeze.");
+    }
+  }
+  if (strictTimeline && template.timingPolicy !== STRICT_TIMELINE_POLICY) {
+    throw new Error(`timingPolicy must be ${STRICT_TIMELINE_POLICY}.`);
+  }
 
   template.blocks.forEach((block, index) => {
     const label = `blocks[${index}]`;
@@ -679,6 +692,9 @@ function validateTemplateBlocks(template, requireReviewed = false) {
     }
     if (typeof block.timecode !== "string" || !TIMECODE_PATTERN.test(block.timecode)) {
       throw new Error(`${label}.timecode is not a valid SRT timecode.`);
+    }
+    if (strictTimeline && block.blockIndex !== index + 1) {
+      throw new Error(`${label}.blockIndex must preserve the original block order.`);
     }
     if (typeof block.correctedJapanese !== "string" || block.correctedJapanese.trim() === "") {
       throw new Error(`${label}.correctedJapanese must be non-empty.`);
@@ -734,11 +750,19 @@ function validateTemplateBlocks(template, requireReviewed = false) {
       }
       if (
         requireReviewed &&
+        changed &&
+        block.overcorrectionReview.status === "pass" &&
+        !block.overcorrectionReview.notes.trim()
+      ) {
+        throw new Error(`${label}.overcorrectionReview.notes must identify the reverse-review basis.`);
+      }
+      if (
+        requireReviewed &&
         template.audioAvailable === true &&
-        block.riskScore >= 5 &&
+        requiresAudioReview(block) &&
         block.audioReview.status === "not-reviewed"
       ) {
-        throw new Error(`${label}.audioReview must resolve high-risk audio when audio is available.`);
+        throw new Error(`${label}.audioReview must resolve audio-critical evidence when audio is available.`);
       }
       if (
         requireReviewed &&
@@ -749,6 +773,13 @@ function validateTemplateBlocks(template, requireReviewed = false) {
       }
     }
   });
+
+  if (strictTimeline && requireReviewed) {
+    const timeline = inspectStrictTimeline(template);
+    if (!timeline.preserved) {
+      throw new Error(`Strict source timeline was not preserved: ${timeline.issues.join(" ")}`);
+    }
+  }
 }
 
 function getSourceIntegrity(template) {
@@ -772,9 +803,10 @@ function buildTemplateAudit(template) {
   const changedMissingEvidence = [];
   const changedMissingChangeTypes = [];
   const changedPendingOvercorrection = [];
-  const highRiskPendingAudio = [];
+  const audioCriticalPending = [];
   const audioReviewMissingNotes = [];
   const sourceIntegrity = getSourceIntegrity(template);
+  const timeline = inspectStrictTimeline(template);
 
   for (const block of template.blocks) {
     const confidence = CONFIDENCE_LEVELS.has(block.confidence) ? block.confidence : "unreviewed";
@@ -806,10 +838,10 @@ function buildTemplateAudit(template) {
     if (
       structuredReview &&
       template.audioAvailable === true &&
-      block.riskScore >= 5 &&
+      requiresAudioReview(block) &&
       block.audioReview.status === "not-reviewed"
     ) {
-      highRiskPendingAudio.push(block.blockIndex);
+      audioCriticalPending.push(block.blockIndex);
     }
     if (
       structuredReview &&
@@ -824,6 +856,12 @@ function buildTemplateAudit(template) {
   const sourceIntegrityResolved = structuredReview
     ? sourceIntegrity === "match"
     : sourceIntegrity !== "mismatch";
+  const boundedWorkflow = Number(template.schemaVersion) >= 4;
+  const workflowPhase = boundedWorkflow ? template.workflow.phase : "legacy";
+  const freezeIntegrity = !boundedWorkflow || (
+    workflowPhase === "frozen" &&
+    template.workflow.frozenContentSha256 === correctedContentSha256(template)
+  );
 
   return {
     schemaVersion: template.schemaVersion ?? 1,
@@ -838,12 +876,17 @@ function buildTemplateAudit(template) {
     changedMissingEvidence,
     changedMissingChangeTypes,
     changedPendingOvercorrection,
-    highRiskPendingAudio,
+    audioCriticalPending,
     audioReviewMissingNotes,
     audioAvailable: template.audioAvailable ?? null,
     audioAvailabilityResolved,
     sourceIntegrity,
     sourceIntegrityResolved,
+    timingPolicy: timeline.policy,
+    sourceTimelinePreserved: timeline.preserved,
+    sourceTimelineIssues: timeline.issues,
+    workflowPhase,
+    freezeIntegrity,
     readyToWrite:
       unreviewedBlocks.length === 0 &&
       sourceIntegrityResolved &&
@@ -851,8 +894,10 @@ function buildTemplateAudit(template) {
       changedMissingEvidence.length === 0 &&
       changedMissingChangeTypes.length === 0 &&
       changedPendingOvercorrection.length === 0 &&
-      highRiskPendingAudio.length === 0 &&
-      audioReviewMissingNotes.length === 0,
+      audioCriticalPending.length === 0 &&
+      audioReviewMissingNotes.length === 0 &&
+      timeline.preserved !== false &&
+      freezeIntegrity,
   };
 }
 
@@ -870,7 +915,11 @@ function printAudit(audit) {
   console.log(`Unchanged: ${audit.unchangedBlockCount}`);
   console.log(`Confidence: high=${audit.confidenceCounts.high}, medium=${audit.confidenceCounts.medium}, low=${audit.confidenceCounts.low}, unreviewed=${audit.confidenceCounts.unreviewed}`);
   console.log(`Source integrity: ${audit.sourceIntegrity}`);
+  console.log(`Timing policy: ${audit.timingPolicy}`);
+  console.log(`Source timeline preserved: ${audit.sourceTimelinePreserved === null ? "legacy" : audit.sourceTimelinePreserved ? "yes" : "no"}`);
   console.log(`Audio available: ${audit.audioAvailable === null ? "not-set" : audit.audioAvailable ? "yes" : "no"}`);
+  console.log(`Workflow phase: ${audit.workflowPhase}`);
+  console.log(`Freeze integrity: ${audit.freezeIntegrity ? "yes" : "no"}`);
   console.log(`Ready to write: ${audit.readyToWrite ? "yes" : "no"}`);
   if (audit.unreviewedBlocks.length) {
     console.log(`Unreviewed blocks: ${audit.unreviewedBlocks.join(", ")}`);
@@ -890,11 +939,17 @@ function printAudit(audit) {
   if (audit.changedPendingOvercorrection.length) {
     console.log(`Changed blocks pending overcorrection review: ${audit.changedPendingOvercorrection.join(", ")}`);
   }
-  if (audit.highRiskPendingAudio.length) {
-    console.log(`High-risk blocks pending audio review: ${audit.highRiskPendingAudio.join(", ")}`);
+  if (audit.audioCriticalPending.length) {
+    console.log(`Audio-critical blocks pending review: ${audit.audioCriticalPending.join(", ")}`);
   }
   if (audit.audioReviewMissingNotes.length) {
     console.log(`Audio review dispositions missing notes: ${audit.audioReviewMissingNotes.join(", ")}`);
+  }
+  if (audit.sourceTimelineIssues.length) {
+    console.log("Source timeline issues:");
+    for (const issue of audit.sourceTimelineIssues) {
+      console.log(`- ${issue}`);
+    }
   }
 }
 
@@ -936,6 +991,8 @@ function buildComparison(sourcePath, sourceBlocks, outputPath, outputBlocks) {
     sourceBlockCount: sourceBlocks.length,
     outputBlockCount: outputBlocks.length,
     blockCountsMatch: sourceBlocks.length === outputBlocks.length,
+    sourceTimelinePreserved:
+      sourceBlocks.length === outputBlocks.length && timingChangedBlocks === 0,
     textChangedBlocks,
     timingChangedBlocks,
     finalBlockPresent: outputBlocks.length > 0 && outputBlocks.at(-1).text.trim() !== "",
@@ -949,6 +1006,7 @@ function printComparison(comparison) {
   console.log(`Block counts match: ${comparison.blockCountsMatch ? "yes" : "no"}`);
   console.log(`Text-changed blocks: ${comparison.textChangedBlocks}`);
   console.log(`Timing-changed blocks: ${comparison.timingChangedBlocks}`);
+  console.log(`Source timeline preserved: ${comparison.sourceTimelinePreserved ? "yes" : "no"}`);
   console.log(`Final block present: ${comparison.finalBlockPresent ? "yes" : "no"}`);
   if (comparison.issues.length) {
     console.log("Comparison issues:");
@@ -959,12 +1017,18 @@ function printComparison(comparison) {
   }
 }
 
-function runInspect(filePath, jsonMode) {
+function runInspect(filePath, jsonMode, outputPath = null) {
   const blocks = parseSrt(readText(filePath));
   const issues = collectIssues(blocks);
   const summary = buildSummary(filePath, blocks, issues);
   if (jsonMode) {
-    console.log(JSON.stringify({ summary, issues, blocks }, null, 2));
+    const serialized = `${JSON.stringify({ summary, issues, blocks }, null, 2)}\n`;
+    if (outputPath) {
+      writeText(outputPath, serialized);
+      console.log(`Structured subtitle data written: ${path.resolve(outputPath)}`);
+    } else {
+      process.stdout.write(serialized);
+    }
   } else {
     printInspect(summary, issues);
   }
@@ -976,6 +1040,74 @@ function runExportTemplate(inputPath, outputPath) {
   const template = exportTemplate(sourceText, blocks, inputPath);
   writeText(outputPath, `${JSON.stringify(template, null, 2)}\n`);
   console.log(`Template written: ${path.resolve(outputPath)}`);
+}
+
+function runAcceptLowRisk(templatePath) {
+  const template = readJson(templatePath);
+  validateTemplateBlocks(template, false);
+  if (Number(template.schemaVersion) < 4) {
+    throw new Error("accept-low-risk requires a schema v4 template.");
+  }
+  if (!["triage", "initial-reviewed"].includes(template.workflow.phase)) {
+    throw new Error("Low-risk blocks must be accepted before the integrated draft.");
+  }
+
+  let accepted = 0;
+  for (const block of template.blocks) {
+    const unchanged =
+      normalizeForChangeDetection(block.sourceText || "") ===
+      normalizeForChangeDetection(block.correctedJapanese);
+    if (
+      unchanged &&
+      block.confidence === "unreviewed" &&
+      block.riskScore === 0 &&
+      block.riskFlags.length === 0
+    ) {
+      block.confidence = "medium";
+      block.notes = block.notes.trim()
+        ? block.notes
+        : "Accepted by deterministic low-risk triage after representative sampling.";
+      accepted += 1;
+    }
+  }
+
+  template.lowRiskTriage = {
+    acceptedAt: new Date().toISOString(),
+    acceptedBlockCount: accepted,
+    method: "risk-free-unchanged-blocks-after-representative-sampling",
+  };
+  writeText(templatePath, `${JSON.stringify(template, null, 2)}\n`);
+  console.log(`Accepted unchanged low-risk blocks: ${accepted}`);
+}
+
+function runAdvanceWorkflow(templatePath, nextPhase) {
+  const template = readJson(templatePath);
+  validateTemplateBlocks(template, false);
+  if (Number(template.schemaVersion) < 4) {
+    throw new Error("advance-workflow requires a schema v4 template.");
+  }
+  if (!WORKFLOW_PHASES.includes(nextPhase)) {
+    throw new Error(`Unsupported workflow phase: ${nextPhase}`);
+  }
+
+  const currentIndex = WORKFLOW_PHASES.indexOf(template.workflow.phase);
+  const expectedPhase = WORKFLOW_PHASES[currentIndex + 1];
+  if (nextPhase !== expectedPhase) {
+    throw new Error(
+      expectedPhase
+        ? `Workflow can only advance from ${template.workflow.phase} to ${expectedPhase}.`
+        : "Workflow is already frozen and cannot advance."
+    );
+  }
+
+  template.workflow.phase = nextPhase;
+  template.workflow.history.push({ phase: nextPhase, at: new Date().toISOString() });
+  if (nextPhase === "frozen") {
+    template.workflow.frozenContentSha256 = correctedContentSha256(template);
+    validateTemplateBlocks(template, true);
+  }
+  writeText(templatePath, `${JSON.stringify(template, null, 2)}\n`);
+  console.log(`Workflow advanced: ${nextPhase}`);
 }
 
 function runAuditTemplate(templatePath, jsonMode) {
@@ -1011,61 +1143,24 @@ function runValidate(filePath, jsonMode) {
   }
 }
 
-function runCompare(sourcePath, outputPath, jsonMode) {
+function runCompare(sourcePath, outputPath, jsonMode, reportPath = null) {
   const sourceBlocks = parseSrt(readText(sourcePath));
   const outputBlocks = parseSrt(readText(outputPath));
   const comparison = buildComparison(sourcePath, sourceBlocks, outputPath, outputBlocks);
   if (jsonMode) {
-    console.log(JSON.stringify(comparison, null, 2));
+    const serialized = `${JSON.stringify(comparison, null, 2)}\n`;
+    if (reportPath) {
+      writeText(reportPath, serialized);
+      console.log(`Comparison report written: ${path.resolve(reportPath)}`);
+    } else {
+      process.stdout.write(serialized);
+    }
   } else {
     printComparison(comparison);
   }
-}
-
-function runAnalyzeSilence(srtPath, mediaPath, outputPath, optionArgs) {
-  if (!fs.existsSync(srtPath)) {
-    throw new Error(`SRT file does not exist: ${path.resolve(srtPath)}`);
+  if (!comparison.sourceTimelinePreserved) {
+    process.exitCode = 1;
   }
-  if (!fs.existsSync(mediaPath)) {
-    throw new Error(`Audio or video file does not exist: ${path.resolve(mediaPath)}`);
-  }
-  const settings = parseSilenceOptions(optionArgs);
-  const blocks = parseSrt(readText(srtPath));
-  const durationMs = probeDurationMs(mediaPath);
-  const silenceIntervals = detectSilenceIntervals(
-    mediaPath,
-    durationMs,
-    settings.noiseDb,
-    settings.minSilenceSeconds
-  );
-  const findings = buildSilenceTimingReport(blocks, silenceIntervals, settings);
-  const report = {
-    schemaVersion: 1,
-    sourceSrt: path.resolve(srtPath),
-    mediaFile: path.resolve(mediaPath),
-    generatedAt: new Date().toISOString(),
-    durationMs,
-    settings,
-    limitations: [
-      "Amplitude silence is not the same as absence of speech.",
-      "Background music or noise can hide speech-free regions.",
-      "Suggestions require listening review before changing timestamps or removing blocks.",
-    ],
-    summary: {
-      blockCount: blocks.length,
-      silenceIntervalCount: silenceIntervals.length,
-      findingCount: findings.length,
-      fullySilentBlockCount: findings.filter((finding) => finding.fullySilent).length,
-      suggestedTimingCount: findings.filter((finding) => finding.suggestedTimecode).length,
-    },
-    silenceIntervals,
-    findings,
-  };
-  writeText(outputPath, `${JSON.stringify(report, null, 2)}\n`);
-  console.log(`Silence timing report written: ${path.resolve(outputPath)}`);
-  console.log(`Findings: ${report.summary.findingCount}`);
-  console.log(`Fully silent blocks: ${report.summary.fullySilentBlockCount}`);
-  console.log(`Timing suggestions: ${report.summary.suggestedTimingCount}`);
 }
 
 function main(argv) {
@@ -1078,7 +1173,18 @@ function main(argv) {
       if (!positionals[0]) {
         throw new Error("A source SRT path is required.");
       }
-      runInspect(positionals[0], command === "dump-json" || jsonMode);
+      runInspect(positionals[0], command === "dump-json" || jsonMode, positionals[1]);
+      return;
+    }
+    if (command === "create-workdir") {
+      runCreateWorkdir(positionals[0]);
+      return;
+    }
+    if (command === "cleanup-workdir") {
+      if (!positionals[0]) {
+        throw new Error("A managed work directory path is required.");
+      }
+      runCleanupWorkdir(positionals[0]);
       return;
     }
     if (command === "export-template") {
@@ -1086,6 +1192,20 @@ function main(argv) {
         throw new Error("Source SRT and output JSON paths are required.");
       }
       runExportTemplate(positionals[0], positionals[1]);
+      return;
+    }
+    if (command === "accept-low-risk") {
+      if (!positionals[0]) {
+        throw new Error("A template JSON path is required.");
+      }
+      runAcceptLowRisk(positionals[0]);
+      return;
+    }
+    if (command === "advance-workflow") {
+      if (!positionals[0] || !positionals[1]) {
+        throw new Error("A template JSON path and next workflow phase are required.");
+      }
+      runAdvanceWorkflow(positionals[0], positionals[1]);
       return;
     }
     if (command === "audit-template") {
@@ -1113,18 +1233,9 @@ function main(argv) {
       if (!positionals[0] || !positionals[1]) {
         throw new Error("Source and corrected SRT paths are required.");
       }
-      runCompare(positionals[0], positionals[1], jsonMode);
+      runCompare(positionals[0], positionals[1], jsonMode, positionals[2]);
       return;
     }
-    if (command === "analyze-silence") {
-      const [srtPath, mediaPath, outputPath, ...optionArgs] = args;
-      if (!srtPath || !mediaPath || !outputPath) {
-        throw new Error("SRT, audio/video, and output JSON paths are required.");
-      }
-      runAnalyzeSilence(srtPath, mediaPath, outputPath, optionArgs);
-      return;
-    }
-
     printUsage();
     process.exitCode = 1;
   } catch (error) {

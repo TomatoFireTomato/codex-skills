@@ -1,4 +1,4 @@
 interface:
   display_name: "Japanese Whisper Subtitle Repair"
-  short_description: "Repair Japanese Whisper SRT with evidence-based review"
-  default_prompt: "Use $subtitle-manual-ja-zh to inspect and repair this Japanese Whisper/ASR SRT, verify proper names and high-risk blocks, and produce a validated Japanese-only corrected subtitle file."
+  short_description: "Repair Japanese Whisper SRT without changing its timeline"
+  default_prompt: "Use $subtitle-manual-ja-zh to repair this Japanese Whisper/ASR SRT, preserve every source timecode and block exactly, verify proper names and high-risk text, and produce a validated Japanese-only corrected subtitle file."
