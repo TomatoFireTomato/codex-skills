@@ -9,13 +9,13 @@ const CONFIDENCE_LEVELS = new Set(["high", "medium", "low"]);
 
 function printUsage() {
   console.log(`Usage:
-  node subtitle-manual-ja-zh/scripts/srt-tool.mjs inspect <file.srt> [--json]
-  node subtitle-manual-ja-zh/scripts/srt-tool.mjs dump-json <file.srt>
-  node subtitle-manual-ja-zh/scripts/srt-tool.mjs export-template <file.srt> <output.json>
-  node subtitle-manual-ja-zh/scripts/srt-tool.mjs audit-template <template.json> [--json]
-  node subtitle-manual-ja-zh/scripts/srt-tool.mjs write-corrected <template.json> <output.srt>
-  node subtitle-manual-ja-zh/scripts/srt-tool.mjs validate <file.srt> [--json]
-  node subtitle-manual-ja-zh/scripts/srt-tool.mjs compare <source.srt> <corrected.srt> [--json]
+  node <skill-dir>/scripts/srt-tool.mjs inspect <file.srt> [--json]
+  node <skill-dir>/scripts/srt-tool.mjs dump-json <file.srt>
+  node <skill-dir>/scripts/srt-tool.mjs export-template <file.srt> <output.json>
+  node <skill-dir>/scripts/srt-tool.mjs audit-template <template.json> [--json]
+  node <skill-dir>/scripts/srt-tool.mjs write-corrected <template.json> <output.srt>
+  node <skill-dir>/scripts/srt-tool.mjs validate <file.srt> [--json]
+  node <skill-dir>/scripts/srt-tool.mjs compare <source.srt> <corrected.srt> [--json]
 
 Commands:
   inspect          Summarize structure and flag likely ASR risks.

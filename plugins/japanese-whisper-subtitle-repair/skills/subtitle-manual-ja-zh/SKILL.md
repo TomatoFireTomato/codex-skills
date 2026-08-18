@@ -15,18 +15,18 @@ Never overwrite the raw SRT. Preserve it as evidence for comparison and rollback
 
 ## Mandatory Node.js Workflow
 
-Use `scripts/srt-tool.mjs` for every SRT read, template export, audit, write, comparison, and validation operation. Do not create a replacement file-IO script. Do not use `cat`, `sed`, `awk`, shell redirection, or freehand SRT editing as the main workflow.
+Resolve `<skill-dir>` as the absolute directory containing this `SKILL.md`. Use `<skill-dir>/scripts/srt-tool.mjs` for every SRT read, template export, audit, write, comparison, and validation operation. This path may be inside the Codex plugin cache, so do not assume the current working directory or a repository-relative location. Do not create a replacement file-IO script. Do not use `cat`, `sed`, `awk`, shell redirection, or freehand SRT editing as the main workflow.
 
 Available commands:
 
 ```bash
-node subtitle-manual-ja-zh/scripts/srt-tool.mjs inspect /path/to/raw.srt
-node subtitle-manual-ja-zh/scripts/srt-tool.mjs dump-json /path/to/raw.srt
-node subtitle-manual-ja-zh/scripts/srt-tool.mjs export-template /path/to/raw.srt /path/to/work.json
-node subtitle-manual-ja-zh/scripts/srt-tool.mjs audit-template /path/to/work.json
-node subtitle-manual-ja-zh/scripts/srt-tool.mjs write-corrected /path/to/work.json /path/to/corrected-ja.srt
-node subtitle-manual-ja-zh/scripts/srt-tool.mjs validate /path/to/corrected-ja.srt
-node subtitle-manual-ja-zh/scripts/srt-tool.mjs compare /path/to/raw.srt /path/to/corrected-ja.srt
+node "<skill-dir>/scripts/srt-tool.mjs" inspect /path/to/raw.srt
+node "<skill-dir>/scripts/srt-tool.mjs" dump-json /path/to/raw.srt
+node "<skill-dir>/scripts/srt-tool.mjs" export-template /path/to/raw.srt /path/to/work.json
+node "<skill-dir>/scripts/srt-tool.mjs" audit-template /path/to/work.json
+node "<skill-dir>/scripts/srt-tool.mjs" write-corrected /path/to/work.json /path/to/corrected-ja.srt
+node "<skill-dir>/scripts/srt-tool.mjs" validate /path/to/corrected-ja.srt
+node "<skill-dir>/scripts/srt-tool.mjs" compare /path/to/raw.srt /path/to/corrected-ja.srt
 ```
 
 ## Evidence Hierarchy

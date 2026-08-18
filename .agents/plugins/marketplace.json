@@ -1,0 +1,20 @@
+{
+  "name": "tomatofire-codex-plugin-marketplace",
+  "interface": {
+    "displayName": "TomatoFire Codex Marketplace"
+  },
+  "plugins": [
+    {
+      "name": "japanese-whisper-subtitle-repair",
+      "source": {
+        "source": "local",
+        "path": "./plugins/japanese-whisper-subtitle-repair"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
