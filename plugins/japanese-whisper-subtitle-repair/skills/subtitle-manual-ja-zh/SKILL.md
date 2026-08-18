@@ -61,15 +61,22 @@ Check:
 
 Use `dump-json` only when structured block data is needed. Do not manually parse the SRT with ad hoc tools.
 
-### 2. Research Background Before Correction
+### 2. Research Only Evidence-Critical Questions
 
-Search the web before editing. Start with the filename, user context, recurring terms, and identifiable names. Prefer official Japanese sources:
-- official work, event, program, broadcaster, publisher, label, or organizer sites
-- official cast, agency, artist, staff, or production pages
-- official Japanese announcements and social accounts
-- reputable Japanese references only when official sources are unavailable
+Do not perform broad background research or search block by block. Inspect first, deduplicate uncertain names and terms, then browse only when external evidence can change a correction. Ordinary grammar, particles, punctuation, common vocabulary, clear audio, and terms already resolved in the glossary do not require web search.
 
-Verify work titles, event names, character names, cast, hosts, singers, songs, locations, organizations, episode terms, and specialist vocabulary. Search only minimal factual terms; never upload the full subtitle file to an online service.
+Default research budget unless the user requests exhaustive research:
+- initial context: at most 3 search queries and 5 opened official pages to identify the work, event, cast list, or authoritative terminology page
+- unresolved term: at most 2 targeted queries; if still unresolved, preserve a conservative reading and record uncertainty instead of continuing
+- long files: collect recurring candidate terms first, then research the deduplicated list in batches; never repeat a query for every occurrence
+
+Trigger targeted research only for:
+- uncertain work, event, character, cast, host, singer, song, location, organization, episode, or specialist-term spelling
+- a repeated ASR variant whose official form would support a systematic correction
+- conflicting candidate readings where an authoritative source can distinguish them
+- a material medium/low-confidence change that cannot be resolved by audio and context
+
+Prefer official Japanese sources in this order: official work/event/program pages, broadcaster/publisher/label/organizer pages, official cast/agency/artist/staff pages, then official announcements or social accounts. Use reputable Japanese references only when official sources are unavailable. Cache each confirmed fact in the glossary with its source and reuse it throughout the file. Search only minimal factual terms; never upload subtitle text or the full subtitle file to an online service.
 
 ### 3. Build an Evidence-Based Terminology Glossary
 
@@ -217,7 +224,7 @@ Use independent validation agents when the user requests them or the file is lon
 - audio evidence reviewer, only when audio exists: timestamped listening, competing hypotheses, overlapping speech, and boundary alignment; do not polish grammar
 - overcorrection reviewer, for long files, extensive edits, or any medium/low-confidence change: compare raw against the integrated draft and report unsupported edits or semantic drift
 
-Do not spawn extra agents when their roles would duplicate an existing reviewer. Do not let validation agents rewrite the complete file. Have them return block-numbered findings with evidence and confidence. The main agent adjudicates conflicts and applies only supported changes; agreement between agents is not evidence by itself.
+Do not spawn extra agents when their roles would duplicate an existing reviewer. Give the proper-name reviewer a deduplicated candidate list and the same research budget; do not let each agent independently repeat broad web searches. Do not let validation agents rewrite the complete file. Have them return block-numbered findings with evidence and confidence. The main agent adjudicates conflicts and applies only supported changes; agreement between agents is not evidence by itself.
 
 ## Naming
 
@@ -246,4 +253,4 @@ Report:
 
 ## Communication
 
-Tell the user briefly that you will inspect structure and ASR risks, research official names, correct Japanese using the strongest available evidence, and validate the corrected SRT. When audio is supplied, say whether you will perform direct listening and optional silence-based timing review. Do not announce a search for ASR models, and do not mention translation or bilingual output.
+Tell the user briefly that you will inspect structure and ASR risks, research only unresolved evidence-critical names or terms, correct Japanese using the strongest available evidence, and validate the corrected SRT. When audio is supplied, say whether you will perform direct listening and optional silence-based timing review. Do not announce a search for ASR models, and do not mention translation or bilingual output.
