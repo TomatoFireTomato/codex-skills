@@ -84,7 +84,12 @@ Use the glossary consistently. For names, compare pronunciation by mora rather t
 
 ### 4. Export and Triage the Work Template
 
-Run `export-template`. Each block includes source text, risk flags, `correctedJapanese`, `confidence`, `evidence`, and `notes`.
+Run `export-template`. Schema v3 adds a 0-10 `riskScore`, `speaker`, `candidateReadings`, `changeTypes`, typed `evidence`, `audioReview`, and `overcorrectionReview`. At the top level, set `audioAvailable` to `true` or `false`, fill `audioSource` when applicable, and maintain temporary `speakers`, `glossary`, and `systematicPatterns` collections. A high risk score prioritizes review; it does not prove the text is wrong.
+
+Use only the schema values accepted by the Node tool:
+- `changeTypes`: `asr-homophone`, `proper-name`, `grammar`, `punctuation`, `segmentation`, `hallucination`, `duplicate`, `timing`, `speaker-label`, or `other`
+- `audioReview.status`: `not-reviewed`, `reviewed-clear`, `reviewed-unclear`, or `not-needed`; explain `reviewed-unclear` and `not-needed` in its notes
+- `overcorrectionReview.status`: `not-reviewed`, `pass`, or `unresolved`; every changed block must reach `pass` before output
 
 Review in this order:
 1. invalid timestamps, empty blocks, and possible data loss
@@ -118,7 +123,9 @@ Do not reconstruct missing speech from imagination or convert speech into polish
 
 If audio or video is available, review high-risk timestamps first. Replay with headphones, slower playback, and short loops when needed. Check surrounding audio to avoid clipping syllables at subtitle boundaries.
 
-When local Whisper tooling is already available, optionally re-decode only high-risk spans using Japanese language lock, a stronger local model, glossary terms in the initial prompt, and more than one decoding setting. Treat alternate ASR hypotheses as evidence, not truth. Do not call external ASR or transcription APIs.
+When local Whisper tooling is already available, optionally re-decode only high-risk spans using Japanese language lock, a stronger local model, glossary terms in the initial prompt, and more than one decoding setting. Preserve competing results in `candidateReadings`. Treat alternate ASR hypotheses as evidence, not truth. Do not call external ASR or transcription APIs.
+
+When alignment tooling is already available, use forced alignment or word timestamps to detect missing speech, clipped morae, and words split across blocks. Do not install large models or tools unless the user asks or the environment already supports them.
 
 If audio channels differ, compare clean speech channels before accepting a correction. Account for music, applause, overlapping speakers, echo, and audience noise.
 
@@ -131,7 +138,9 @@ Use these confidence levels:
 - `medium`: strongly supported by context, phonetics, and grammar but not directly verified
 - `low`: multiple plausible readings remain; keep conservative wording and explain in `notes`
 
-Record evidence for material changes. Require notes for low-confidence blocks. Prefer leaving a plausible raw phrase unchanged over replacing it with a more fluent invention.
+Record evidence for every material change and classify it in `changeTypes`. Prefer structured evidence objects with a supported type and concise detail: `audio-confirmed`, `official-transcript`, `official-name`, `context-inferred`, `phonetic-analysis`, `grammar-only`, `alternate-asr`, `speaker-profile`, `reference-subtitle`, or `unresolved`. Require notes for low-confidence blocks. Prefer leaving a plausible raw phrase unchanged over replacing it with a more fluent invention.
+
+For uncertain words, retain plausible alternatives in `candidateReadings` and compare mora sequence, grammar, scene meaning, speaker knowledge, and source authority. Do not select a candidate by fluency or agent majority vote alone.
 
 Use a two-pass review:
 - recall pass: find all plausible ASR errors and systematic patterns
@@ -146,8 +155,13 @@ Run `audit-template` before writing. Confirm:
 - all high-risk blocks were explicitly reviewed
 - systematic name and term corrections are consistent
 - unchanged text is intentional, not skipped work
+- every changed block has evidence and a change type
+- every changed block passes `overcorrectionReview`
+- when audio exists, every block with `riskScore >= 5` has an audio disposition
 
 Sample several unflagged blocks from the beginning, middle, and end to detect systematic errors missed by heuristics.
+
+Run a reverse review against raw text after the integrated draft. Its sole purpose is to catch unsupported rewrites, semantic drift, accidental deletion of genuine repetition, and spoken Japanese converted into polished prose. Mark a changed block `pass` only after this review; leave unresolved findings conservative.
 
 ### 9. Write, Validate, and Compare
 
@@ -170,6 +184,7 @@ Use these methods when they fit the material:
 - Pattern mining: after confirming one ASR confusion, search structured block data for the same variant and review every occurrence.
 - Speaker profiles: track each speaker's names, catchphrases, dialect, sentence endings, and recurring vocabulary.
 - Phonetic candidate testing: compare candidates by mora sequence, devoicing, long vowels, gemination, rendaku, and likely boundary shifts.
+- Reference alignment: align an official transcript, script, lyrics, or reference subtitle by time and meaning; use non-Japanese subtitles only as scene evidence, never as a reconstruction of Japanese wording.
 - Negative evidence: reject a fluent candidate when it conflicts with the scene, speaker knowledge, official terminology, or adjacent grammar.
 - Hypothesis agreement: increase confidence when audio, official spelling, context, and independent review converge; do not rely on majority vote alone.
 - Boundary review: inspect words split across adjacent blocks and punctuation that changes meaning.
@@ -184,8 +199,10 @@ Use independent validation agents when the user requests them or the file is lon
 - Japanese naturalness reviewer: grammar, particles, conjugation, segmentation, and punctuation
 - proper-name reviewer: official spellings and glossary consistency
 - subtitle engineering reviewer: numbering, timing, density, overlap, empty blocks, and final-block integrity
+- audio evidence reviewer, only when audio exists: timestamped listening, competing hypotheses, overlapping speech, and boundary alignment; do not polish grammar
+- overcorrection reviewer, for long files, extensive edits, or any medium/low-confidence change: compare raw against the integrated draft and report unsupported edits or semantic drift
 
-Do not let validation agents rewrite the complete file. Have them return block-numbered findings with evidence and confidence. The main agent adjudicates conflicts and applies only supported changes.
+Do not spawn extra agents when their roles would duplicate an existing reviewer. Do not let validation agents rewrite the complete file. Have them return block-numbered findings with evidence and confidence. The main agent adjudicates conflicts and applies only supported changes; agreement between agents is not evidence by itself.
 
 ## Naming
 
@@ -206,6 +223,9 @@ Report:
 - official sources used for proper-name normalization
 - whether audio was reviewed or correction was text-only
 - whether targeted local re-decoding was used
+- whether forced alignment or reference subtitle alignment was used
+- unresolved candidate readings and their block numbers
+- whether changed blocks passed the overcorrection review
 - whether validation agents were used and how their findings were resolved
 
 ## Communication

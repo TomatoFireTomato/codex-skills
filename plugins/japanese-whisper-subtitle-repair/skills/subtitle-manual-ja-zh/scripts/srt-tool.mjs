@@ -6,6 +6,38 @@ import path from "path";
 
 const TIMECODE_PATTERN = /^(\d{2}:\d{2}:\d{2},\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2},\d{3})$/;
 const CONFIDENCE_LEVELS = new Set(["high", "medium", "low"]);
+const EVIDENCE_TYPES = new Set([
+  "audio-confirmed",
+  "official-transcript",
+  "official-name",
+  "context-inferred",
+  "phonetic-analysis",
+  "grammar-only",
+  "alternate-asr",
+  "speaker-profile",
+  "reference-subtitle",
+  "unresolved",
+]);
+const CHANGE_TYPES = new Set([
+  "asr-homophone",
+  "proper-name",
+  "grammar",
+  "punctuation",
+  "segmentation",
+  "hallucination",
+  "duplicate",
+  "timing",
+  "speaker-label",
+  "other",
+]);
+const AUDIO_REVIEW_STATUSES = new Set([
+  "not-reviewed",
+  "reviewed-clear",
+  "reviewed-unclear",
+  "not-needed",
+]);
+const OVERCORRECTION_REVIEW_STATUSES = new Set(["not-reviewed", "pass", "unresolved"]);
+const ISSUE_WEIGHTS = { high: 5, medium: 2, low: 1 };
 
 function printUsage() {
   console.log(`Usage:
@@ -79,6 +111,10 @@ function normalizeForComparison(text) {
     .normalize("NFKC")
     .toLowerCase()
     .replace(/[\s\p{P}\p{S}]/gu, "");
+}
+
+function normalizeForChangeDetection(text) {
+  return text.normalize("NFKC").replace(/\s+/gu, " ").trim();
 }
 
 function parseSrt(text) {
@@ -316,10 +352,17 @@ function issuesByBlock(issues) {
   const grouped = new Map();
   for (const issue of issues) {
     const current = grouped.get(issue.blockIndex) || [];
-    current.push(issue.type);
+    current.push(issue);
     grouped.set(issue.blockIndex, current);
   }
   return grouped;
+}
+
+function riskScoreForIssues(issues) {
+  return Math.min(
+    10,
+    issues.reduce((score, issue) => score + (ISSUE_WEIGHTS[issue.severity] || 1), 0)
+  );
 }
 
 function exportTemplate(sourceText, blocks, sourcePath) {
@@ -327,23 +370,43 @@ function exportTemplate(sourceText, blocks, sourcePath) {
   const blockRisks = issuesByBlock(issues);
 
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     sourceFile: path.resolve(sourcePath),
     sourceSha256: sha256(sourceText),
     generatedAt: new Date().toISOString(),
     blockCount: blocks.length,
-    blocks: blocks.map((block) => ({
-      blockIndex: block.blockIndex,
-      sequenceNumber: block.sequenceNumber ?? block.blockIndex,
-      timecode: block.timecode,
-      sourceTextLines: block.textLines,
-      sourceText: block.text,
-      riskFlags: blockRisks.get(block.blockIndex) || [],
-      correctedJapanese: block.textLines.join(" ").trim(),
-      confidence: "unreviewed",
-      evidence: [],
-      notes: "",
-    })),
+    audioAvailable: null,
+    audioSource: "",
+    speakers: [],
+    glossary: [],
+    systematicPatterns: [],
+    blocks: blocks.map((block) => {
+      const blockIssues = blockRisks.get(block.blockIndex) || [];
+      return {
+        blockIndex: block.blockIndex,
+        sequenceNumber: block.sequenceNumber ?? block.blockIndex,
+        timecode: block.timecode,
+        sourceTextLines: block.textLines,
+        sourceText: block.text,
+        riskFlags: blockIssues.map((issue) => issue.type),
+        riskScore: riskScoreForIssues(blockIssues),
+        speaker: "",
+        correctedJapanese: block.textLines.join(" ").trim(),
+        candidateReadings: [],
+        changeTypes: [],
+        confidence: "unreviewed",
+        evidence: [],
+        audioReview: {
+          status: "not-reviewed",
+          notes: "",
+        },
+        overcorrectionReview: {
+          status: "not-reviewed",
+          notes: "",
+        },
+        notes: "",
+      };
+    }),
   };
 }
 
@@ -353,8 +416,63 @@ function assertTemplateShape(template) {
   }
 }
 
+function validateEvidence(label, evidence) {
+  if (!Array.isArray(evidence)) {
+    throw new Error(`${label}.evidence must be an array.`);
+  }
+
+  evidence.forEach((item, index) => {
+    const evidenceLabel = `${label}.evidence[${index}]`;
+    if (typeof item === "string") {
+      if (!item.trim()) {
+        throw new Error(`${evidenceLabel} must not be empty.`);
+      }
+      return;
+    }
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error(`${evidenceLabel} must be a string or evidence object.`);
+    }
+    if (!EVIDENCE_TYPES.has(item.type)) {
+      throw new Error(`${evidenceLabel}.type is not a supported evidence type.`);
+    }
+    if (typeof item.detail !== "string" || !item.detail.trim()) {
+      throw new Error(`${evidenceLabel}.detail must be non-empty.`);
+    }
+  });
+}
+
+function validateReviewField(label, review, allowedStatuses) {
+  if (!review || typeof review !== "object" || Array.isArray(review)) {
+    throw new Error(`${label} must be an object.`);
+  }
+  if (!allowedStatuses.has(review.status)) {
+    throw new Error(`${label}.status is not supported.`);
+  }
+  if (review.notes !== undefined && typeof review.notes !== "string") {
+    throw new Error(`${label}.notes must be a string.`);
+  }
+}
+
 function validateTemplateBlocks(template, requireReviewed = false) {
   assertTemplateShape(template);
+  const structuredReview = Number(template.schemaVersion) >= 3;
+
+  if (structuredReview) {
+    if (![null, true, false].includes(template.audioAvailable)) {
+      throw new Error("audioAvailable must be null, true, or false.");
+    }
+    if (typeof template.audioSource !== "string") {
+      throw new Error("audioSource must be a string.");
+    }
+    for (const field of ["speakers", "glossary", "systematicPatterns"]) {
+      if (!Array.isArray(template[field])) {
+        throw new Error(`${field} must be an array.`);
+      }
+    }
+  }
+  if (structuredReview && requireReviewed && typeof template.audioAvailable !== "boolean") {
+    throw new Error("audioAvailable must be set to true or false before writing output.");
+  }
 
   template.blocks.forEach((block, index) => {
     const label = `blocks[${index}]`;
@@ -376,8 +494,61 @@ function validateTemplateBlocks(template, requireReviewed = false) {
     if (block.confidence === "low" && (!block.notes || !block.notes.trim())) {
       throw new Error(`${label}.notes must explain low-confidence wording.`);
     }
-    if (block.evidence !== undefined && !Array.isArray(block.evidence)) {
-      throw new Error(`${label}.evidence must be an array.`);
+    if (!structuredReview && block.evidence !== undefined) {
+      validateEvidence(label, block.evidence);
+    }
+
+    if (structuredReview) {
+      if (!Array.isArray(block.riskFlags) || block.riskFlags.some((item) => typeof item !== "string")) {
+        throw new Error(`${label}.riskFlags must contain only strings.`);
+      }
+      if (!Number.isInteger(block.riskScore) || block.riskScore < 0 || block.riskScore > 10) {
+        throw new Error(`${label}.riskScore must be an integer from 0 to 10.`);
+      }
+      if (typeof block.speaker !== "string") {
+        throw new Error(`${label}.speaker must be a string.`);
+      }
+      if (!Array.isArray(block.candidateReadings) || block.candidateReadings.some((item) => typeof item !== "string" || !item.trim())) {
+        throw new Error(`${label}.candidateReadings must contain only non-empty strings.`);
+      }
+      if (!Array.isArray(block.changeTypes) || block.changeTypes.some((item) => !CHANGE_TYPES.has(item))) {
+        throw new Error(`${label}.changeTypes contains an unsupported change type.`);
+      }
+      validateEvidence(label, block.evidence);
+      validateReviewField(`${label}.audioReview`, block.audioReview, AUDIO_REVIEW_STATUSES);
+      validateReviewField(
+        `${label}.overcorrectionReview`,
+        block.overcorrectionReview,
+        OVERCORRECTION_REVIEW_STATUSES
+      );
+
+      const changed =
+        normalizeForChangeDetection(block.sourceText || "") !==
+        normalizeForChangeDetection(block.correctedJapanese);
+      if (requireReviewed && changed && block.evidence.length === 0) {
+        throw new Error(`${label}.evidence must explain every material change.`);
+      }
+      if (requireReviewed && changed && block.changeTypes.length === 0) {
+        throw new Error(`${label}.changeTypes must classify every material change.`);
+      }
+      if (requireReviewed && changed && block.overcorrectionReview.status !== "pass") {
+        throw new Error(`${label}.overcorrectionReview must pass before writing output.`);
+      }
+      if (
+        requireReviewed &&
+        template.audioAvailable === true &&
+        block.riskScore >= 5 &&
+        block.audioReview.status === "not-reviewed"
+      ) {
+        throw new Error(`${label}.audioReview must resolve high-risk audio when audio is available.`);
+      }
+      if (
+        requireReviewed &&
+        ["reviewed-unclear", "not-needed"].includes(block.audioReview.status) &&
+        !block.audioReview.notes.trim()
+      ) {
+        throw new Error(`${label}.audioReview.notes must explain ${block.audioReview.status}.`);
+      }
     }
   });
 }
@@ -394,11 +565,17 @@ function getSourceIntegrity(template) {
 
 function buildTemplateAudit(template) {
   validateTemplateBlocks(template, false);
+  const structuredReview = Number(template.schemaVersion) >= 3;
   const confidenceCounts = { high: 0, medium: 0, low: 0, unreviewed: 0 };
   const unreviewedBlocks = [];
   const lowConfidenceBlocks = [];
   const riskyUnreviewedBlocks = [];
   const changedBlocks = [];
+  const changedMissingEvidence = [];
+  const changedMissingChangeTypes = [];
+  const changedPendingOvercorrection = [];
+  const highRiskPendingAudio = [];
+  const audioReviewMissingNotes = [];
   const sourceIntegrity = getSourceIntegrity(template);
 
   for (const block of template.blocks) {
@@ -413,12 +590,45 @@ function buildTemplateAudit(template) {
     if (confidence === "low") {
       lowConfidenceBlocks.push(block.blockIndex);
     }
-    if (normalizeForComparison(block.sourceText || "") !== normalizeForComparison(block.correctedJapanese)) {
+    const changed =
+      normalizeForChangeDetection(block.sourceText || "") !==
+      normalizeForChangeDetection(block.correctedJapanese);
+    if (changed) {
       changedBlocks.push(block.blockIndex);
+      if (structuredReview && block.evidence.length === 0) {
+        changedMissingEvidence.push(block.blockIndex);
+      }
+      if (structuredReview && block.changeTypes.length === 0) {
+        changedMissingChangeTypes.push(block.blockIndex);
+      }
+      if (structuredReview && block.overcorrectionReview.status !== "pass") {
+        changedPendingOvercorrection.push(block.blockIndex);
+      }
+    }
+    if (
+      structuredReview &&
+      template.audioAvailable === true &&
+      block.riskScore >= 5 &&
+      block.audioReview.status === "not-reviewed"
+    ) {
+      highRiskPendingAudio.push(block.blockIndex);
+    }
+    if (
+      structuredReview &&
+      ["reviewed-unclear", "not-needed"].includes(block.audioReview.status) &&
+      !block.audioReview.notes.trim()
+    ) {
+      audioReviewMissingNotes.push(block.blockIndex);
     }
   }
 
+  const audioAvailabilityResolved = !structuredReview || typeof template.audioAvailable === "boolean";
+  const sourceIntegrityResolved = structuredReview
+    ? sourceIntegrity === "match"
+    : sourceIntegrity !== "mismatch";
+
   return {
+    schemaVersion: template.schemaVersion ?? 1,
     blockCount: template.blocks.length,
     changedBlockCount: changedBlocks.length,
     unchangedBlockCount: template.blocks.length - changedBlocks.length,
@@ -427,8 +637,24 @@ function buildTemplateAudit(template) {
     riskyUnreviewedBlocks,
     lowConfidenceBlocks,
     changedBlocks,
+    changedMissingEvidence,
+    changedMissingChangeTypes,
+    changedPendingOvercorrection,
+    highRiskPendingAudio,
+    audioReviewMissingNotes,
+    audioAvailable: template.audioAvailable ?? null,
+    audioAvailabilityResolved,
     sourceIntegrity,
-    readyToWrite: unreviewedBlocks.length === 0 && sourceIntegrity !== "mismatch",
+    sourceIntegrityResolved,
+    readyToWrite:
+      unreviewedBlocks.length === 0 &&
+      sourceIntegrityResolved &&
+      audioAvailabilityResolved &&
+      changedMissingEvidence.length === 0 &&
+      changedMissingChangeTypes.length === 0 &&
+      changedPendingOvercorrection.length === 0 &&
+      highRiskPendingAudio.length === 0 &&
+      audioReviewMissingNotes.length === 0,
   };
 }
 
@@ -440,11 +666,13 @@ function renderCorrectedSrt(template) {
 }
 
 function printAudit(audit) {
+  console.log(`Template schema: ${audit.schemaVersion}`);
   console.log(`Blocks: ${audit.blockCount}`);
   console.log(`Changed: ${audit.changedBlockCount}`);
   console.log(`Unchanged: ${audit.unchangedBlockCount}`);
   console.log(`Confidence: high=${audit.confidenceCounts.high}, medium=${audit.confidenceCounts.medium}, low=${audit.confidenceCounts.low}, unreviewed=${audit.confidenceCounts.unreviewed}`);
   console.log(`Source integrity: ${audit.sourceIntegrity}`);
+  console.log(`Audio available: ${audit.audioAvailable === null ? "not-set" : audit.audioAvailable ? "yes" : "no"}`);
   console.log(`Ready to write: ${audit.readyToWrite ? "yes" : "no"}`);
   if (audit.unreviewedBlocks.length) {
     console.log(`Unreviewed blocks: ${audit.unreviewedBlocks.join(", ")}`);
@@ -454,6 +682,21 @@ function printAudit(audit) {
   }
   if (audit.lowConfidenceBlocks.length) {
     console.log(`Low-confidence blocks: ${audit.lowConfidenceBlocks.join(", ")}`);
+  }
+  if (audit.changedMissingEvidence.length) {
+    console.log(`Changed blocks missing evidence: ${audit.changedMissingEvidence.join(", ")}`);
+  }
+  if (audit.changedMissingChangeTypes.length) {
+    console.log(`Changed blocks missing change types: ${audit.changedMissingChangeTypes.join(", ")}`);
+  }
+  if (audit.changedPendingOvercorrection.length) {
+    console.log(`Changed blocks pending overcorrection review: ${audit.changedPendingOvercorrection.join(", ")}`);
+  }
+  if (audit.highRiskPendingAudio.length) {
+    console.log(`High-risk blocks pending audio review: ${audit.highRiskPendingAudio.join(", ")}`);
+  }
+  if (audit.audioReviewMissingNotes.length) {
+    console.log(`Audio review dispositions missing notes: ${audit.audioReviewMissingNotes.join(", ")}`);
   }
 }
 
@@ -484,7 +727,7 @@ function buildComparison(sourcePath, sourceBlocks, outputPath, outputBlocks) {
         detail: `${source.timecode} -> ${output.timecode}`,
       });
     }
-    if (source.normalizedText !== output.normalizedText) {
+    if (normalizeForChangeDetection(source.text) !== normalizeForChangeDetection(output.text)) {
       textChangedBlocks += 1;
     }
   }
@@ -553,7 +796,7 @@ function runWriteCorrected(templatePath, outputPath) {
     throw new Error("Source SRT changed after template export. Export a new template before writing.");
   }
   if (!audit.readyToWrite) {
-    throw new Error(`Template has ${audit.unreviewedBlocks.length} unreviewed blocks. Run audit-template first.`);
+    throw new Error("Template is not ready to write. Run audit-template and resolve every reported item.");
   }
   writeText(outputPath, renderCorrectedSrt(template));
   console.log(`Wrote corrected Japanese SRT: ${path.resolve(outputPath)}`);

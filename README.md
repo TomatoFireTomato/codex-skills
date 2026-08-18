@@ -82,6 +82,7 @@ Validate before publishing:
 python3 ~/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py plugins/japanese-whisper-subtitle-repair
 python3 ~/.codex/skills/.system/skill-creator/scripts/quick_validate.py plugins/japanese-whisper-subtitle-repair/skills/subtitle-manual-ja-zh
 node --check plugins/japanese-whisper-subtitle-repair/skills/subtitle-manual-ja-zh/scripts/srt-tool.mjs
+node --test plugins/japanese-whisper-subtitle-repair/skills/subtitle-manual-ja-zh/scripts/srt-tool.test.mjs
 ```
 
 ## Adding Another Plugin
